@@ -9,28 +9,30 @@ struct Row {
     score: String,
     #[tabled(rename = "Bounty")]
     bounty: String,
+    #[tabled(rename = "Web")]
+    web: String,
+    #[tabled(rename = "Health")]
+    health: String,
     #[tabled(rename = "Resp")]
     resp: String,
-    #[tabled(rename = "Scope")]
-    scope: String,
-    #[tabled(rename = "Android")]
-    android: String,
-    #[tabled(rename = "Mobility")]
-    mobility: String,
+    #[tabled(rename = "Diff")]
+    difficulty: String,
+    #[tabled(rename = "Scopes")]
+    scopes: String,
 }
 
-pub fn render_table(scores: &[ProgramScore], mobility_flags: &[bool]) -> String {
+pub fn render_table(scores: &[ProgramScore]) -> String {
     let rows: Vec<Row> = scores
         .iter()
-        .zip(mobility_flags.iter())
-        .map(|(s, &is_mobility)| Row {
+        .map(|s| Row {
             program: format!("{} ({})", s.name, s.handle),
             score: format!("{:.1}", s.total),
             bounty: format!("{:.0}", s.bounty_score),
+            web: format!("{:.0}", s.web_scope_score),
+            health: format!("{:.0}", s.health_score),
             resp: format!("{:.0}", s.response_score),
-            scope: format!("{:.0}", s.scope_score),
-            android: if s.has_android { "Y".into() } else { "N".into() },
-            mobility: if is_mobility { "Y".into() } else { "N".into() },
+            difficulty: format!("{:.0}", s.difficulty_score),
+            scopes: format!("{}", s.web_scope_count),
         })
         .collect();
 

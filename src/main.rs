@@ -12,13 +12,11 @@ pub mod llm;
 use anyhow::Result;
 use clap::Parser;
 
-use cli::{Cli, Commands, FilterType, OutputFormat};
+use cli::{Cli, Commands, OutputFormat};
 use api::client::H1Client;
 use db::cache::Cache;
 use scorer::engine::score_program;
 use scorer::weights::Weights;
-use filter::mobility::is_mobility_target;
-use filter::android::has_android;
 
 fn get_db_path() -> String {
     let home = dirs::home_dir().unwrap_or_else(|| ".".into());
@@ -75,59 +73,75 @@ async fn main() -> Result<()> {
 
             cache.upsert_programs(&programs).await?;
 
+            // Concurrent scope fetching (10 at a time)
+            let pb = indicatif::ProgressBar::new(programs.len() as u64);
+            pb.set_style(indicatif::ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] {bar:40} {pos}/{len} scopes fetched")
+                .unwrap());
+
+            let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
+            let client = std::sync::Arc::new(client);
+            let mut handles = Vec::new();
+
             for p in &programs {
-                let scopes = client.fetch_scopes(&p.attributes.handle).await?;
-                cache.upsert_scopes(&p.attributes.handle, &scopes).await?;
+                let sem = semaphore.clone();
+                let client = client.clone();
+                let handle = p.attributes.handle.clone();
+
+                let h = tokio::spawn(async move {
+                    let _permit = sem.acquire().await.unwrap();
+                    let scopes = client.fetch_scopes(&handle).await;
+                    (handle, scopes)
+                });
+                handles.push(h);
             }
 
+            for h in handles {
+                let (handle, scopes_result) = h.await?;
+                match scopes_result {
+                    Ok(scopes) => cache.upsert_scopes(&handle, &scopes).await?,
+                    Err(e) => eprintln!("Warning: failed to fetch scopes for {}: {}", handle, e),
+                }
+                pb.inc(1);
+            }
+
+            pb.finish_and_clear();
             println!("Done. Data cached at {}", db_path);
         }
 
-        Commands::List { top, filter, format } => {
+        Commands::List { top, min_scopes, format } => {
             let cache = Cache::new(&db_path).await?;
             let weights = Weights::from_config(&config_path);
             let programs = cache.get_all_programs().await?;
+            let min = min_scopes.unwrap_or(1);
 
             let mut scored: Vec<_> = Vec::new();
-            let mut mobility_flags: Vec<bool> = Vec::new();
 
             for p in &programs {
                 let scopes = cache.get_scopes_for(&p.attributes.handle).await?;
-                let is_mob = is_mobility_target(p, &scopes);
-                let is_andr = has_android(&scopes);
+                let score = score_program(p, &scopes, &weights);
 
-                let dominated = filter.iter().any(|f| match f {
-                    FilterType::Android => !is_andr,
-                    FilterType::Mobility => !is_mob,
-                });
-                if dominated {
+                if score.web_scope_count < min {
                     continue;
                 }
 
-                let score = score_program(p, &scopes, &weights);
                 scored.push(score);
-                mobility_flags.push(is_mob);
             }
 
             scored.sort_by(|a, b| b.total.partial_cmp(&a.total).unwrap());
-            let mut indexed: Vec<_> = scored.iter().zip(mobility_flags.iter()).enumerate().collect();
-            indexed.sort_by(|a, b| b.1.0.total.partial_cmp(&a.1.0.total).unwrap());
-            let sorted_mobility: Vec<bool> = indexed.iter().map(|(_, (_, &m))| m).collect();
-            let mobility_flags = sorted_mobility;
 
             let n = top.unwrap_or(scored.len());
             let scored = &scored[..n.min(scored.len())];
-            let mobility_flags = &mobility_flags[..n.min(mobility_flags.len())];
 
             match format {
                 OutputFormat::Table => {
-                    println!("{}", output::table::render_table(scored, mobility_flags));
+                    println!("{}", output::table::render_table(scored));
                 }
                 OutputFormat::Json => {
-                    println!("{}", output::json::render_json(scored, mobility_flags));
+                    println!("{}", output::json::render_json(scored));
                 }
                 OutputFormat::Csv => {
-                    println!("{}", output::json::render_csv(scored, mobility_flags));
+                    println!("{}", output::json::render_csv(scored));
                 }
             }
         }
@@ -138,22 +152,22 @@ async fn main() -> Result<()> {
             let programs = cache.get_all_programs().await?;
 
             let mut scored: Vec<_> = Vec::new();
-            let mut mobility_flags: Vec<bool> = Vec::new();
 
             for p in &programs {
                 let scopes = cache.get_scopes_for(&p.attributes.handle).await?;
-                let is_mob = is_mobility_target(p, &scopes);
                 let score = score_program(p, &scopes, &weights);
+                if score.web_scope_count == 0 {
+                    continue;
+                }
                 scored.push(score);
-                mobility_flags.push(is_mob);
             }
 
             scored.sort_by(|a, b| b.total.partial_cmp(&a.total).unwrap());
 
             let content = match format {
-                OutputFormat::Json => output::json::render_json(&scored, &mobility_flags),
-                OutputFormat::Csv => output::json::render_csv(&scored, &mobility_flags),
-                OutputFormat::Table => output::table::render_table(&scored, &mobility_flags),
+                OutputFormat::Json => output::json::render_json(&scored),
+                OutputFormat::Csv => output::json::render_csv(&scored),
+                OutputFormat::Table => output::table::render_table(&scored),
             };
 
             match out_path {

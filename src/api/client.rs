@@ -3,6 +3,7 @@ use reqwest::Client;
 
 use super::models::{ProgramData, ProgramList, ScopeData, ScopeList};
 
+#[derive(Clone)]
 pub struct H1Client {
     client: Client,
     username: String,

@@ -586,7 +586,7 @@ mod tests {
         // program_info.json
         std::fs::write(
             project_dir.join("program_info.json"),
-            r#"{"handle":"test","name":"Test Program","score":85.0,"has_android":false}"#,
+            r#"{"handle":"test","name":"Test Program","score":85.0,"web_scopes":3,"difficulty":50.0}"#,
         ).unwrap();
 
         // rule.csv

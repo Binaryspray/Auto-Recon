@@ -18,14 +18,14 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// List and rank programs
+    /// List and rank programs by web recon score
     List {
         /// Show only top N results
         #[arg(long)]
         top: Option<usize>,
-        /// Filter by type
-        #[arg(long, value_enum)]
-        filter: Vec<FilterType>,
+        /// Minimum web scope count to show
+        #[arg(long)]
+        min_scopes: Option<usize>,
         /// Output format
         #[arg(long, value_enum, default_value = "table")]
         format: OutputFormat,
@@ -51,12 +51,6 @@ pub enum Commands {
         #[arg(long)]
         project_id: Option<String>,
     },
-}
-
-#[derive(Clone, ValueEnum)]
-pub enum FilterType {
-    Android,
-    Mobility,
 }
 
 #[derive(Clone, ValueEnum)]

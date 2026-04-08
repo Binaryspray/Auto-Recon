@@ -7,8 +7,6 @@ use crate::api::models::{ScopeData, ProgramData};
 use crate::db::cache::Cache;
 use crate::scorer::engine::{score_program, ProgramScore};
 use crate::scorer::weights::Weights;
-use crate::filter::mobility::is_mobility_target;
-use crate::filter::android::has_android;
 
 const OUT_OF_SCOPE_KEYWORDS: &[&str] = &[
     "out of scope",
@@ -88,7 +86,8 @@ pub fn init_project_dir(project_id: &str, base_dir: &Path, program: &ProgramData
         "handle": program.attributes.handle,
         "name": program.attributes.name,
         "score": score.total,
-        "has_android": score.has_android,
+        "web_scopes": score.web_scope_count,
+        "difficulty": score.difficulty_score,
     });
     std::fs::write(
         project_dir.join("program_info.json"),
@@ -114,30 +113,31 @@ pub fn init_project_dir(project_id: &str, base_dir: &Path, program: &ProgramData
 pub async fn run_select(cache: &Cache, weights: &Weights, projects_dir: &str) -> Result<()> {
     let programs = cache.get_all_programs().await?;
 
-    // Score and sort
-    let mut entries: Vec<(ProgramData, Vec<ScopeData>, ProgramScore, bool)> = Vec::new();
+    // Score and sort — skip programs with no web scopes
+    let mut entries: Vec<(ProgramData, Vec<ScopeData>, ProgramScore)> = Vec::new();
     for p in &programs {
         let scopes = cache.get_scopes_for(&p.attributes.handle).await?;
-        let is_mob = is_mobility_target(p, &scopes);
         let score = score_program(p, &scopes, weights);
-        entries.push((p.clone(), scopes, score, is_mob));
+        if score.web_scope_count == 0 {
+            continue;
+        }
+        entries.push((p.clone(), scopes, score));
     }
     entries.sort_by(|a, b| b.2.total.partial_cmp(&a.2.total).unwrap());
 
     if entries.is_empty() {
-        println!("No programs in cache. Run `h1scout fetch` first.");
+        println!("No programs with web scopes in cache. Run `h1scout fetch` first.");
         return Ok(());
     }
 
     // Build display items
     let items: Vec<String> = entries
         .iter()
-        .map(|(p, scopes, score, _)| {
-            let web_count = filter_web_scopes(scopes).len();
-            let android = if has_android(scopes) { " [AND]" } else { "" };
+        .map(|(p, _, score)| {
             format!(
-                "[{:.1}] {} ({}){} — web:{}",
-                score.total, p.attributes.name, p.attributes.handle, android, web_count
+                "[{:.1}] {} ({}) — web:{} diff:{:.0}",
+                score.total, p.attributes.name, p.attributes.handle,
+                score.web_scope_count, score.difficulty_score
             )
         })
         .collect();
@@ -156,7 +156,7 @@ pub async fn run_select(cache: &Cache, weights: &Weights, projects_dir: &str) ->
     let base_dir = Path::new(projects_dir);
 
     for idx in selections {
-        let (program, scopes, score, _) = &entries[idx];
+        let (program, scopes, score) = &entries[idx];
         let web_scopes = filter_web_scopes(scopes);
 
         if web_scopes.is_empty() {
