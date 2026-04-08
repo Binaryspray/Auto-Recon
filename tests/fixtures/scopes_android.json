@@ -1,0 +1,8 @@
+{
+  "data": [
+    {"id":"s1","type":"structured-scope","attributes":{"asset_type":"ANDROID","asset_identifier":"com.gm.myvehicle","eligible_for_bounty":true,"eligible_for_submission":true,"max_severity":"critical"}},
+    {"id":"s2","type":"structured-scope","attributes":{"asset_type":"URL","asset_identifier":"*.gm.com","eligible_for_bounty":true,"eligible_for_submission":true,"max_severity":"high"}},
+    {"id":"s3","type":"structured-scope","attributes":{"asset_type":"ANDROID","asset_identifier":"com.uber.driver","eligible_for_bounty":true,"eligible_for_submission":true,"max_severity":"critical"}}
+  ],
+  "links": {}
+}

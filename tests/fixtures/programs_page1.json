@@ -1,0 +1,8 @@
+{
+  "data": [
+    {"id":"1","type":"program","attributes":{"handle":"general-motors","name":"General Motors","offers_bounties":true,"submission_state":"open","fast_payments":true,"open_scope":false}},
+    {"id":"2","type":"program","attributes":{"handle":"uber","name":"Uber","offers_bounties":true,"submission_state":"open","fast_payments":true,"open_scope":true}},
+    {"id":"3","type":"program","attributes":{"handle":"grab","name":"Grab","offers_bounties":true,"submission_state":"open","fast_payments":false,"open_scope":false}}
+  ],
+  "links": {"next":"https://api.hackerone.com/v1/hackers/programs?page[number]=2"}
+}

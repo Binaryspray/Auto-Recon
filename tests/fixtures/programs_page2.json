@@ -1,0 +1,7 @@
+{
+  "data": [
+    {"id":"4","type":"program","attributes":{"handle":"lyft","name":"Lyft","offers_bounties":true,"submission_state":"open","fast_payments":true,"open_scope":false}},
+    {"id":"5","type":"program","attributes":{"handle":"ford","name":"Ford Motor Company","offers_bounties":true,"submission_state":"open","fast_payments":false,"open_scope":true}}
+  ],
+  "links": {}
+}
