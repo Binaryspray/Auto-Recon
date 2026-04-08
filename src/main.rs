@@ -80,7 +80,8 @@ async fn main() -> Result<()> {
             let mut done = 0usize;
             let mut round = 1;
 
-            while !pending.is_empty() {
+            let max_rounds = 5;
+            while !pending.is_empty() && round <= max_rounds {
                 if round > 1 {
                     println!("Round {} — retrying {} failed scopes (waiting 10s)...", round, pending.len());
                     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
@@ -129,7 +130,10 @@ async fn main() -> Result<()> {
                 round += 1;
             }
 
-            println!("Done. All {} scopes cached at {}", total, db_path);
+            if !pending.is_empty() {
+                eprintln!("Warning: {} scopes could not be fetched after {} rounds: {:?}", pending.len(), max_rounds, pending);
+            }
+            println!("Done. {}/{} scopes cached at {}", done, total, db_path);
         }
 
         Commands::List { top, min_scopes, format } => {
