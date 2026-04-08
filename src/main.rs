@@ -73,40 +73,63 @@ async fn main() -> Result<()> {
 
             cache.upsert_programs(&programs).await?;
 
-            // Concurrent scope fetching (10 at a time)
-            let pb = indicatif::ProgressBar::new(programs.len() as u64);
-            pb.set_style(indicatif::ProgressStyle::default_bar()
-                .template("[{elapsed_precise}] {bar:40} {pos}/{len} scopes fetched")
-                .unwrap());
-
-            let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(5));
+            // Concurrent scope fetching with retry queue
             let client = std::sync::Arc::new(client);
-            let mut handles = Vec::new();
+            let mut pending: Vec<String> = programs.iter().map(|p| p.attributes.handle.clone()).collect();
+            let total = pending.len();
+            let mut done = 0usize;
+            let mut round = 1;
 
-            for p in &programs {
-                let sem = semaphore.clone();
-                let client = client.clone();
-                let handle = p.attributes.handle.clone();
-
-                let h = tokio::spawn(async move {
-                    let _permit = sem.acquire().await.unwrap();
-                    let scopes = client.fetch_scopes(&handle).await;
-                    (handle, scopes)
-                });
-                handles.push(h);
-            }
-
-            for h in handles {
-                let (handle, scopes_result) = h.await?;
-                match scopes_result {
-                    Ok(scopes) => cache.upsert_scopes(&handle, &scopes).await?,
-                    Err(e) => eprintln!("Warning: failed to fetch scopes for {}: {}", handle, e),
+            while !pending.is_empty() {
+                if round > 1 {
+                    println!("Round {} — retrying {} failed scopes (waiting 10s)...", round, pending.len());
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                 }
-                pb.inc(1);
+
+                let pb = indicatif::ProgressBar::new(pending.len() as u64);
+                pb.set_style(indicatif::ProgressStyle::default_bar()
+                    .template(&format!("[{{elapsed_precise}}] {{bar:40}} {{pos}}/{{len}} (round {})", round))
+                    .unwrap());
+
+                let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(5));
+                let mut handles = Vec::new();
+
+                for handle in &pending {
+                    let sem = semaphore.clone();
+                    let client = client.clone();
+                    let handle = handle.clone();
+
+                    let h = tokio::spawn(async move {
+                        let _permit = sem.acquire().await.unwrap();
+                        let scopes = client.fetch_scopes(&handle).await;
+                        (handle, scopes)
+                    });
+                    handles.push(h);
+                }
+
+                let mut failed = Vec::new();
+                for h in handles {
+                    let (handle, scopes_result) = h.await?;
+                    match scopes_result {
+                        Ok(scopes) => {
+                            cache.upsert_scopes(&handle, &scopes).await?;
+                            done += 1;
+                        }
+                        Err(_) => {
+                            failed.push(handle);
+                        }
+                    }
+                    pb.inc(1);
+                }
+
+                pb.finish_and_clear();
+                println!("Round {} done — {}/{} total, {} failed", round, done, total, failed.len());
+
+                pending = failed;
+                round += 1;
             }
 
-            pb.finish_and_clear();
-            println!("Done. Data cached at {}", db_path);
+            println!("Done. All {} scopes cached at {}", total, db_path);
         }
 
         Commands::List { top, min_scopes, format } => {
