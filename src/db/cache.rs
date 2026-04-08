@@ -148,6 +148,7 @@ impl Cache {
     }
 
     pub async fn get_scopes_for(&self, handle: &str) -> Result<Vec<ScopeData>> {
+        #[allow(clippy::type_complexity)]
         let rows: Vec<(String, String, String, bool, bool, Option<String>, Option<String>)> = sqlx::query_as(
             "SELECT id, asset_type, asset_identifier, eligible_for_bounty, eligible_for_submission, max_severity, instruction FROM scopes WHERE handle = ?1",
         )

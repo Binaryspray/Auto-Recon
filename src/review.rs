@@ -101,7 +101,7 @@ pub async fn run_review(projects_dir: &str, project_id: Option<&str>) -> Result<
     }
 
     // Display APs
-    let ap_items: Vec<String> = rr.attack_points.iter().map(|ap| format_ap_display(ap)).collect();
+    let ap_items: Vec<String> = rr.attack_points.iter().map(format_ap_display).collect();
 
     let selections = dialoguer::MultiSelect::new()
         .with_prompt("Select APs to send to Auto-Solve (Space to toggle, Enter to confirm)")
