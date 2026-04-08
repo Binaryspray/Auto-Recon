@@ -70,7 +70,7 @@ impl H1Client {
     }
 
     async fn get_with_retry<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
-        let max_retries = 3;
+        let max_retries = 5;
 
         for attempt in 0..=max_retries {
             let resp = self
@@ -84,7 +84,9 @@ impl H1Client {
 
             if status == 429 {
                 if attempt < max_retries {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    // Exponential backoff: 2s, 4s, 8s, 16s, 32s
+                    let delay = std::time::Duration::from_secs(2u64.pow(attempt as u32));
+                    tokio::time::sleep(delay).await;
                     continue;
                 }
                 return Err(anyhow!("Rate limited after {} retries", max_retries));

@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
                 .template("[{elapsed_precise}] {bar:40} {pos}/{len} scopes fetched")
                 .unwrap());
 
-            let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
+            let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(5));
             let client = std::sync::Arc::new(client);
             let mut handles = Vec::new();
 
