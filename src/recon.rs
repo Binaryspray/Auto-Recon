@@ -165,8 +165,10 @@ impl ReconRunner {
 
             let mut args = vec![
                 "-t".to_string(), domain.to_string(),
-                "-o".to_string(), self.recon_dir.to_string_lossy().to_string(),
                 "--silent".to_string(),
+                "--fast-mode".to_string(),
+                "-f".to_string(), "subdomain-enum".to_string(),
+                "--json".to_string(),
             ];
             args.extend(bbot_flags.iter().cloned());
 
@@ -174,7 +176,26 @@ impl ReconRunner {
                 Ok(output) => {
                     for line in output.lines() {
                         let trimmed = line.trim();
-                        if !trimmed.is_empty() {
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        // Parse BBOT JSON output — extract DNS_NAME and URL_UNVERIFIED hosts
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                            let etype = val["type"].as_str().unwrap_or("");
+                            if etype == "DNS_NAME" || etype == "URL_UNVERIFIED" {
+                                if let Some(data) = val["data"].as_str() {
+                                    let host = data.trim_start_matches("http://")
+                                        .trim_start_matches("https://")
+                                        .split('/')
+                                        .next()
+                                        .unwrap_or(data);
+                                    if !host.is_empty() {
+                                        all_subdomains.push(host.to_string());
+                                    }
+                                }
+                            }
+                        } else {
+                            // Fallback: treat as plain subdomain
                             all_subdomains.push(trimmed.to_string());
                         }
                     }
