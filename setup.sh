@@ -33,7 +33,7 @@ fi
 echo "[3/4] Installing Python tools..."
 if ! command -v pipx &>/dev/null; then
     pip install pipx --break-system-packages 2>/dev/null || pip install pipx
-    pipx ensurepath
+    pipx ensurepath --force
 fi
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -45,10 +45,23 @@ else
     echo "  bbot already installed"
 fi
 
-# linkfinder
-if ! python3 -c "import linkfinder" 2>/dev/null; then
+# linkfinder (from GitHub, not on PyPI)
+LINKFINDER_DIR="$HOME/.local/share/linkfinder"
+if [ ! -d "$LINKFINDER_DIR" ]; then
     echo "  Installing linkfinder..."
-    pip install linkfinder --break-system-packages 2>/dev/null || pip install linkfinder
+    REPO="https://github.com/dark-warlord14/LinkFinder.git"
+    git clone "$REPO" "$LINKFINDER_DIR"
+    cd "$LINKFINDER_DIR"
+    python3 -m venv venv
+    venv/bin/pip install -r requirements.txt 2>/dev/null || venv/bin/pip install argparse requests jsbeautifier
+    mkdir -p "$HOME/.local/bin"
+    cat > "$HOME/.local/bin/linkfinder" << 'WRAPPER'
+#!/bin/bash
+LINKFINDER_DIR="$HOME/.local/share/linkfinder"
+exec "$LINKFINDER_DIR/venv/bin/python3" "$LINKFINDER_DIR/linkfinder.py" "$@"
+WRAPPER
+    chmod +x "$HOME/.local/bin/linkfinder"
+    cd - >/dev/null
 else
     echo "  linkfinder already installed"
 fi

@@ -148,13 +148,20 @@ impl ReconRunner {
 
     /// Step 1: Subdomain enumeration with BBOT
     pub fn run_bbot(&self, targets: &[String], bbot_flags: &[String]) -> Result<Vec<String>> {
-        let pb = self.progress_bar(1, 5, "Subdomain enumeration (BBOT)...");
+        let total = targets.len();
+        let pb = ProgressBar::new(total as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("[1/5] {bar:30} {pos}/{len} domains — {msg}")
+                .unwrap(),
+        );
+        pb.set_message("BBOT subdomain enumeration");
 
         let mut all_subdomains = Vec::new();
 
-        for target in targets {
-            // Strip wildcard prefix
+        for (i, target) in targets.iter().enumerate() {
             let domain = target.trim_start_matches("*.");
+            pb.set_message(format!("{}", domain));
 
             let mut args = vec![
                 "-t".to_string(), domain.to_string(),
@@ -172,8 +179,9 @@ impl ReconRunner {
                         }
                     }
                 }
-                Err(e) => eprintln!("BBOT failed for {}: {}", domain, e),
+                Err(e) => eprintln!("\nBBOT failed for {}: {}", domain, e),
             }
+            pb.set_position((i + 1) as u64);
         }
 
         all_subdomains.sort();
@@ -215,12 +223,20 @@ impl ReconRunner {
 
     /// Step 3: URL collection (gau + waybackurls)
     pub fn run_url_collection(&self, targets: &[String]) -> Result<Vec<String>> {
-        let pb = self.progress_bar(3, 5, "URL collection (gau, waybackurls)...");
+        let total = targets.len();
+        let pb = ProgressBar::new(total as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("[3/5] {bar:30} {pos}/{len} domains — {msg}")
+                .unwrap(),
+        );
+        pb.set_message("URL collection");
 
         let mut all_urls = Vec::new();
 
-        for target in targets {
+        for (i, target) in targets.iter().enumerate() {
             let domain = target.trim_start_matches("*.");
+            pb.set_message(format!("{}", domain));
 
             // gau
             if let Ok(output) = self.run_cmd("gau", &[domain, "--subs"]) {
@@ -239,6 +255,7 @@ impl ReconRunner {
                     }
                 }
             }
+            pb.set_position((i + 1) as u64);
         }
 
         all_urls.sort();
