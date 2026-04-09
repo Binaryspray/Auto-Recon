@@ -339,6 +339,14 @@ impl ReconRunner {
 
     /// Step 4: Nuclei scan
     pub fn run_nuclei(&self) -> Result<Vec<String>> {
+        // Skip if SKIP_NUCLEI env var is set
+        if std::env::var("SKIP_NUCLEI").is_ok() {
+            println!("[4/5] Skipped nuclei (SKIP_NUCLEI set)");
+            // Create empty file so downstream steps don't fail
+            std::fs::write(self.recon_dir.join("nuclei.txt"), "").ok();
+            return Ok(vec![]);
+        }
+
         let live_hosts_path = self.recon_dir.join("live_hosts.txt");
         if !live_hosts_path.exists() {
             println!("[4/5] Skipped nuclei — no live hosts");
@@ -386,10 +394,10 @@ impl ReconRunner {
         let js_endpoints = self.read_file_lines("js_endpoints.txt");
         let nuclei = self.read_file_lines("nuclei.txt");
 
-        // Read the AP identifier skill (select via AP_SKILL env var)
+        // Read the AP identifier skill (boundary is default, vuln is legacy)
         let skill_content = match std::env::var("AP_SKILL").as_deref() {
-            Ok("boundary") => include_str!("../SKILL/ap-identifier-boundary-SKILL.md"),
-            _ => include_str!("../SKILL/ap-identifier-SKILL.md"),
+            Ok("vuln") => include_str!("../SKILL/ap-identifier-SKILL.md"),
+            _ => include_str!("../SKILL/ap-identifier-boundary-SKILL.md"),
         };
 
         let prompt = format!(
