@@ -1,0 +1,28 @@
+{
+  "project_id": "superhuman_20260409",
+  "bbp": {
+    "platform": "hackerone",
+    "handle": "superhuman",
+    "name": "Superhuman (formerly Grammarly)",
+    "score": 89.0
+  },
+  "scope": {
+    "identifier": "*.grammarly.io",
+    "asset_type": "WILDCARD",
+    "eligible_for_bounty": true,
+    "max_severity": "critical",
+    "instruction": null,
+    "availability_requirement": null,
+    "confidentiality_requirement": null,
+    "integrity_requirement": null
+  },
+  "target": {
+    "subdomain": "*.grammarly.io",
+    "ip": null,
+    "tech_stack": [],
+    "status_code": 0,
+    "title": null
+  },
+  "attack_points": [],
+  "created_at": "2026-04-09T09:13:03.075377599+09:00"
+}

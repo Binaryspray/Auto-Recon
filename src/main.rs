@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
             let mut done = 0usize;
             let mut round = 1;
 
-            let max_rounds = 5;
+            let max_rounds = 3;
             while !pending.is_empty() && round <= max_rounds {
                 if round > 1 {
                     println!("Round {} — retrying {} failed scopes (waiting 10s)...", round, pending.len());
