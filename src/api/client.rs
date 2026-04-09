@@ -106,4 +106,18 @@ impl H1Client {
 
         Err(anyhow!("Max retries exceeded"))
     }
+
+    /// Download the official scope CSV from HackerOne's public endpoint.
+    pub async fn download_scope_csv(&self, handle: &str) -> Result<String> {
+        let url = format!("https://hackerone.com/teams/{}/assets/download_csv.csv", handle);
+        let resp = self.client.get(&url).send().await?;
+        if !resp.status().is_success() {
+            return Err(anyhow!("Scope CSV download failed for {}: HTTP {}", handle, resp.status()));
+        }
+        let body = resp.text().await?;
+        if body.is_empty() {
+            return Err(anyhow!("Scope CSV is empty for {}", handle));
+        }
+        Ok(body)
+    }
 }

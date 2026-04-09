@@ -155,6 +155,12 @@ pub async fn run_select(cache: &Cache, weights: &Weights, projects_dir: &str) ->
 
     let base_dir = Path::new(projects_dir);
 
+    // H1 client for official scope CSV download (optional)
+    let h1_client = match (std::env::var("H1_USERNAME"), std::env::var("H1_API_TOKEN")) {
+        (Ok(u), Ok(t)) => Some(crate::api::client::H1Client::new(&u, &t)),
+        _ => None,
+    };
+
     for idx in selections {
         let (program, scopes, score) = &entries[idx];
         let web_scopes = filter_web_scopes(scopes);
@@ -167,6 +173,20 @@ pub async fn run_select(cache: &Cache, weights: &Weights, projects_dir: &str) ->
         let project_id = make_project_id(&program.attributes.handle);
         let project_dir = init_project_dir(&project_id, base_dir, program, score, &web_scopes)?;
         println!("Created project: {}", project_dir.display());
+
+        // Download official H1 scope CSV (non-blocking)
+        if let Some(ref client) = h1_client {
+            match client.download_scope_csv(&program.attributes.handle).await {
+                Ok(csv) => {
+                    if let Err(e) = std::fs::write(project_dir.join("h1_scope.csv"), &csv) {
+                        eprintln!("Warning: failed to write h1_scope.csv: {}", e);
+                    } else {
+                        println!("  Downloaded h1_scope.csv ({} bytes)", csv.len());
+                    }
+                }
+                Err(e) => eprintln!("Warning: could not download scope CSV: {}", e),
+            }
+        }
 
         // Run recon pipeline
         crate::recon::run_recon(&project_dir).await?;
