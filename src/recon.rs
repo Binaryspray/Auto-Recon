@@ -130,7 +130,7 @@ impl ReconRunner {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("Warning: {} failed: {}", cmd, stderr);
+            eprintln!("Warning: {} failed: {}", cmd, stderr.trim());
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -161,12 +161,13 @@ impl ReconRunner {
 
         for (i, target) in targets.iter().enumerate() {
             let domain = target.trim_start_matches("*.");
-            pb.set_message(format!("{}", domain));
+            pb.set_message(domain.to_string());
 
             let mut args = vec![
                 "-t".to_string(), domain.to_string(),
                 "--silent".to_string(),
                 "--fast-mode".to_string(),
+                "--force".to_string(),
                 "-f".to_string(), "subdomain-enum".to_string(),
                 "--json".to_string(),
             ];
@@ -257,7 +258,7 @@ impl ReconRunner {
 
         for (i, target) in targets.iter().enumerate() {
             let domain = target.trim_start_matches("*.");
-            pb.set_message(format!("{}", domain));
+            pb.set_message(domain.to_string());
 
             // gau
             if let Ok(output) = self.run_cmd("gau", &[domain, "--subs"]) {
