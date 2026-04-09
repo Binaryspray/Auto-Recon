@@ -339,31 +339,40 @@ impl ReconRunner {
 
     /// Step 4: Nuclei scan
     pub fn run_nuclei(&self) -> Result<Vec<String>> {
-        let pb = self.progress_bar(4, 5, "Vulnerability scan (nuclei)...");
-
         let live_hosts_path = self.recon_dir.join("live_hosts.txt");
         if !live_hosts_path.exists() {
-            pb.finish_with_message("Skipped nuclei — no live hosts");
+            println!("[4/5] Skipped nuclei — no live hosts");
             return Ok(vec![]);
         }
 
+        println!("[4/5] Nuclei scan running (stats every 10s)...");
+
         let output_path = self.recon_dir.join("nuclei.txt");
-        let _ = self.run_cmd(
-            "nuclei",
-            &[
+        // Run nuclei with inherited stderr so stats print to terminal
+        let status = Command::new("nuclei")
+            .args([
                 "-l", &live_hosts_path.to_string_lossy(),
                 "-tags", "exposure,config,misconfig,token,secret,info,takeover,cname",
                 "-severity", "critical,high,medium,low",
                 "-rate-limit", "10",
                 "-timeout", "10",
                 "-exclude-tags", "dos,fuzz,intrusive",
+                "-stats", "-stats-interval", "10",
                 "-o", &output_path.to_string_lossy(),
-                "-silent",
-            ],
-        );
+            ])
+            .current_dir(&self.recon_dir)
+            .env("PATH", Self::extended_path())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status();
+
+        if let Err(e) = status {
+            eprintln!("Warning: nuclei failed: {}", e);
+        }
 
         let results = self.read_file_lines("nuclei.txt");
-        pb.finish_with_message(format!("Nuclei found {} results", results.len()));
+        println!("[4/5] Nuclei found {} results", results.len());
         Ok(results)
     }
 
