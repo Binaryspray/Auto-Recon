@@ -122,10 +122,20 @@ impl ReconRunner {
         pb
     }
 
+    fn extended_path() -> String {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+        let current_path = std::env::var("PATH").unwrap_or_default();
+        format!(
+            "{}/go/bin:{}/.local/bin:{}/.cargo/bin:/usr/local/go/bin:{}",
+            home, home, home, current_path
+        )
+    }
+
     fn run_cmd(&self, cmd: &str, args: &[&str]) -> Result<String> {
         let output = Command::new(cmd)
             .args(args)
             .current_dir(&self.recon_dir)
+            .env("PATH", Self::extended_path())
             .output()?;
 
         if !output.status.success() {

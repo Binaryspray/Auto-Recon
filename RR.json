@@ -1,13 +1,13 @@
 {
-  "project_id": "superhuman_20260409",
+  "project_id": "varonis_20260409",
   "bbp": {
     "platform": "hackerone",
-    "handle": "superhuman",
-    "name": "Superhuman (formerly Grammarly)",
-    "score": 89.0
+    "handle": "varonis",
+    "name": "Varonis",
+    "score": 85.2
   },
   "scope": {
-    "identifier": "*.grammarly.io",
+    "identifier": "*.varonis.com",
     "asset_type": "WILDCARD",
     "eligible_for_bounty": true,
     "max_severity": "critical",
@@ -17,12 +17,12 @@
     "integrity_requirement": null
   },
   "target": {
-    "subdomain": "*.grammarly.io",
+    "subdomain": "*.varonis.com",
     "ip": null,
     "tech_stack": [],
     "status_code": 0,
     "title": null
   },
   "attack_points": [],
-  "created_at": "2026-04-09T09:13:03.075377599+09:00"
+  "created_at": "2026-04-09T10:49:13.799359142+09:00"
 }
