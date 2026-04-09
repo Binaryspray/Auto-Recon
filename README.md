@@ -157,10 +157,22 @@ cargo build --release
 ### 1. 환경 변수 설정
 
 ```bash
+# 필수
 export H1_USERNAME="your_h1_username"
 export H1_API_TOKEN="your_h1_api_token"
 export PATH="$HOME/.cargo/bin:$HOME/go/bin:$HOME/.local/bin:/usr/local/go/bin:$PATH"
+
+# 선택 (recon 동작 조정)
+export SKIP_NUCLEI=1        # nuclei 단계 건너뛰기 (WAF 차단 시)
+export AP_SKILL=vuln        # legacy vuln SKILL 사용 (기본은 boundary)
 ```
+
+| 환경변수 | 기본값 | 설명 |
+|---|---|---|
+| `H1_USERNAME` | (필수) | HackerOne API 사용자명 |
+| `H1_API_TOKEN` | (필수) | HackerOne API 토큰 |
+| `SKIP_NUCLEI` | unset | 설정 시 nuclei 4단계 건너뜀 |
+| `AP_SKILL` | `boundary` | `vuln` 지정 시 legacy SKILL 사용 |
 
 ### 2. BBP 데이터 수집
 
@@ -189,7 +201,10 @@ export PATH="$HOME/.cargo/bin:$HOME/go/bin:$HOME/.local/bin:/usr/local/go/bin:$P
 ### 4. BBP 선택 → Recon 실행
 
 ```bash
-./target/release/h1scout select
+./target/release/h1scout select                            # 기본 (boundary SKILL + nuclei)
+SKIP_NUCLEI=1 ./target/release/h1scout select              # nuclei 스킵 (WAF에 막힐 때)
+AP_SKILL=vuln ./target/release/h1scout select              # legacy vuln SKILL 사용
+SKIP_NUCLEI=1 AP_SKILL=vuln ./target/release/h1scout select # 둘 다 적용
 ```
 
 1. 스코어 순으로 BBP 목록 표시 (web scope 없는 프로그램은 제외)
@@ -198,6 +213,7 @@ export PATH="$HOME/.cargo/bin:$HOME/go/bin:$HOME/.local/bin:/usr/local/go/bin:$P
 4. 완료 시 `~/.h1scout/projects/{handle}_{날짜}/RR.json` 생성
 
 > BBOT은 도메인당 3~10분, nuclei는 호스트 수에 따라 5~20분 소요됩니다.
+> WAF(Imperva, Cloudflare 등) 뒤에 있으면 nuclei가 대부분 차단되므로 `SKIP_NUCLEI=1` 권장.
 
 ### 5. 결과 리뷰 → Auto-Solve 입력 생성
 
@@ -229,6 +245,45 @@ export PATH="$HOME/.cargo/bin:$HOME/go/bin:$HOME/.local/bin:/usr/local/go/bin:$P
         │   └── nuclei.txt          ← nuclei 스캔 결과
         └── RR.json             ← 최종 Recon Result (Auto-Solve 입력)
 ```
+
+## AP 식별 SKILL
+
+LLM이 recon 데이터를 분석할 때 사용하는 프롬프트 SKILL이 두 종류 있습니다.
+
+### Boundary SKILL (default)
+
+**8개 보안 경계(Boundary)** 관점으로 분류. "어떤 경계가 깨지는가"가 분류 축.
+
+| Boundary | 핵심 | 카테고리 예시 |
+|---|---|---|
+| **Asset** | 운영 범위 안/밖 | `asset.takeover`, `asset.staging_exposed`, `asset.legacy_service` |
+| **Entry Point** | 노출된/숨겨진 기능 | `entry.hidden_route`, `entry.graphql_exposure`, `entry.info_disclosure` |
+| **Identity** | 인증된/안 된 사용자 | `identity.auth_bypass`, `identity.session_introspection`, `identity.account_takeover` |
+| **Authorization** | 허용된/금지된 행위 | `authz.idor`, `authz.privilege_escalation`, `authz.tenant_bypass`, `authz.function_level` |
+| **Data** | 변경 가능/불가능 상태 | `data.injection`, `data.mass_assignment`, `data.ssrf`, `data.kv_arbitrary_write` |
+| **Trust** | 내부/외부 시스템 신뢰 | `trust.oauth_misconfig`, `trust.webhook_forgery`, `trust.ssrf_via_integration` |
+| **Flow** | 정상/비정상 순서 | `flow.step_skip`, `flow.precondition_bypass`, `flow.race_condition` |
+| **File** | 안전한/위험한 파일 처리 | `file.upload_rce`, `file.path_traversal`, `file.export_idor` |
+
+각 boundary마다 **Recon 단서**(찾을 것)와 **Solve 검증 항목**(테스트할 것)이 분리되어 있어, LLM이 후속 Auto-Solve 단계를 위한 가이드를 함께 생성합니다.
+
+### Vuln SKILL (legacy)
+
+**8개 취약점 유형**으로 분류. `IDOR`, `auth_bypass`, `exposure`, `secret`, `injection`, `takeover`, `oauth_misconfig`, `jwt_attack`.
+
+`AP_SKILL=vuln` 환경변수로 사용 가능. Boundary SKILL 대비 분류 다양성이 낮고 Asset/Trust/Flow/File 영역 누락이 있습니다.
+
+### 비교 (Varonis BBP 기준)
+
+| 지표 | Vuln SKILL | Boundary SKILL |
+|---|---|---|
+| AP 개수 | 45 | **65 (+44%)** |
+| 카테고리 종류 | 6 | **29** |
+| Asset 영역 | ❌ | ✅ |
+| Trust 영역 | 부분 | ✅ |
+| Flow 영역 | ❌ | ✅ |
+| File 영역 | 부분 | ✅ |
+| Solve 검증 가이드 | ❌ | ✅ |
 
 ## RR.json 스키마
 
@@ -277,6 +332,7 @@ difficulty = 0.20
 | `command not found: gau` | PATH 미설정 | `export PATH="$HOME/go/bin:$PATH"` |
 | `Rate limited after 5 retries` | H1 API rate limit | 자동 재시도됨, 기다리면 됨 |
 | nuclei 첫 실행 느림 | 템플릿 다운로드 | `nuclei -update-templates` 미리 실행 |
+| nuclei 무한 실행 / 0 matched | WAF가 nuclei 차단 | `SKIP_NUCLEI=1` 환경변수로 스킵 |
 | BBOT sudo 비밀번호 요구 | 모듈 의존성 설치 | `sudo sh -c 'echo "user ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/nopasswd'` |
 | linkfinder `No module named` | 잘못된 호출 방식 | `setup.sh`로 재설치 (래퍼 스크립트 생성) |
 | `live hosts 0` | httpx가 PATH에 없음 | `setup.sh` 재실행 또는 PATH 확인 |
