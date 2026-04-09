@@ -311,8 +311,8 @@ impl ReconRunner {
         // linkfinder on JS files
         let mut js_endpoints = Vec::new();
         for js_url in &js_files {
-            if let Ok(output) = self.run_cmd("python3", &[
-                "-m", "linkfinder", "-i", js_url, "-o", "cli",
+            if let Ok(output) = self.run_cmd("linkfinder", &[
+                "-i", js_url, "-o", "cli",
             ]) {
                 for line in output.lines() {
                     if !line.trim().is_empty() {
