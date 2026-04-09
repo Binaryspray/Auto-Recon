@@ -44,6 +44,36 @@ pub enum Commands {
         /// Projects directory (default: ~/.h1scout/projects)
         #[arg(long)]
         projects_dir: Option<String>,
+        /// Skip nuclei scan (recommended when behind WAF)
+        #[arg(long)]
+        skip_nuclei: bool,
+        /// AP identification skill: "boundary" (default) or "vuln" (legacy)
+        #[arg(long, default_value = "boundary")]
+        skill: String,
+        /// Don't auto-launch review TUI after recon completes
+        #[arg(long)]
+        no_review: bool,
+    },
+    /// Re-run recon on an existing project
+    Recon {
+        /// Project ID (e.g. varonis_20260409)
+        #[arg(long)]
+        project_id: String,
+        /// Only re-run LLM AP identification (skip BBOT/httpx/gau/nuclei)
+        #[arg(long)]
+        only_ap: bool,
+        /// Skip nuclei scan
+        #[arg(long)]
+        skip_nuclei: bool,
+        /// AP identification skill: "boundary" (default) or "vuln" (legacy)
+        #[arg(long, default_value = "boundary")]
+        skill: String,
+    },
+    /// List completed projects
+    Projects {
+        /// Show only the most recent project
+        #[arg(long)]
+        latest: bool,
     },
     /// TUI: review attack points and generate Auto-Solve input
     Review {

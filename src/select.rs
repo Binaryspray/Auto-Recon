@@ -110,7 +110,13 @@ pub fn init_project_dir(project_id: &str, base_dir: &Path, program: &ProgramData
     Ok(project_dir)
 }
 
-pub async fn run_select(cache: &Cache, weights: &Weights, projects_dir: &str) -> Result<()> {
+pub async fn run_select(
+    cache: &Cache,
+    weights: &Weights,
+    projects_dir: &str,
+    recon_opts: crate::recon::ReconOptions,
+    auto_review: bool,
+) -> Result<()> {
     let programs = cache.get_all_programs().await?;
 
     // Score and sort — skip programs with no web scopes
@@ -189,7 +195,15 @@ pub async fn run_select(cache: &Cache, weights: &Weights, projects_dir: &str) ->
         }
 
         // Run recon pipeline
-        crate::recon::run_recon(&project_dir).await?;
+        crate::recon::run_recon(&project_dir, recon_opts.clone()).await?;
+
+        // Auto-launch review TUI
+        if auto_review {
+            println!("\n=== Launching review for {} ===\n", project_id);
+            crate::review::run_review(projects_dir, Some(&project_id)).await?;
+        } else {
+            println!("\nTo review this project: h1scout review --project-id {}", project_id);
+        }
     }
 
     Ok(())

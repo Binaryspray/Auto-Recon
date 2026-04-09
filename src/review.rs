@@ -42,7 +42,7 @@ fn load_rr(project_dir: &Path) -> Result<ReconResult> {
     Ok(rr)
 }
 
-fn find_completed_projects(projects_dir: &Path) -> Result<Vec<(String, ReconResult)>> {
+pub fn find_completed_projects(projects_dir: &Path) -> Result<Vec<(String, ReconResult)>> {
     let mut results = Vec::new();
 
     if !projects_dir.exists() {

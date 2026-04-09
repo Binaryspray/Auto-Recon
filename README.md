@@ -106,6 +106,17 @@ cd Auto-Recon
 Rust, Go, BBOT, gau, waybackurls, httpx, nuclei, linkfinder 전부 설치하고 `h1scout` 빌드까지 자동으로 수행합니다.
 이미 설치된 도구는 스킵합니다.
 
+### 시스템 PATH에 설치 (권장)
+
+빌드 후 한 번만 실행하면 어디서든 `h1scout` 명령으로 호출 가능:
+
+```bash
+cd Auto-Recon
+cargo install --path .   # ~/.cargo/bin/h1scout 에 설치
+```
+
+이후 `./target/release/h1scout` 대신 그냥 `h1scout`로 호출.
+
 ### 요구 사항
 
 - Linux amd64 (Ubuntu/Debian/Kali)
@@ -154,6 +165,14 @@ cargo build --release
 
 ## 사용법
 
+### 빠른 시작 (2단계)
+
+```bash
+export H1_USERNAME="..." H1_API_TOKEN="..."
+h1scout list --top 10           # cache 비어있으면 자동 fetch
+h1scout select --skip-nuclei    # TUI 선택 → recon → 자동 review
+```
+
 ### 1. 환경 변수 설정
 
 ```bash
@@ -161,65 +180,80 @@ cargo build --release
 export H1_USERNAME="your_h1_username"
 export H1_API_TOKEN="your_h1_api_token"
 export PATH="$HOME/.cargo/bin:$HOME/go/bin:$HOME/.local/bin:/usr/local/go/bin:$PATH"
-
-# 선택 (recon 동작 조정)
-export SKIP_NUCLEI=1        # nuclei 단계 건너뛰기 (WAF 차단 시)
-export AP_SKILL=vuln        # legacy vuln SKILL 사용 (기본은 boundary)
 ```
 
 | 환경변수 | 기본값 | 설명 |
 |---|---|---|
 | `H1_USERNAME` | (필수) | HackerOne API 사용자명 |
 | `H1_API_TOKEN` | (필수) | HackerOne API 토큰 |
-| `SKIP_NUCLEI` | unset | 설정 시 nuclei 4단계 건너뜀 |
-| `AP_SKILL` | `boundary` | `vuln` 지정 시 legacy SKILL 사용 |
+| `SKIP_NUCLEI` | unset | (legacy, `--skip-nuclei` 권장) |
+| `AP_SKILL` | `boundary` | (legacy, `--skill` 권장) |
 
 ### 2. BBP 데이터 수집
 
 ```bash
-./target/release/h1scout fetch          # H1 API에서 프로그램 + scope 수집
-./target/release/h1scout fetch --force   # 캐시 무시하고 재수집
-./target/release/h1scout fetch --dry-run # 실제 수집 없이 확인만
+h1scout fetch              # H1 API에서 프로그램 + scope 수집
+h1scout fetch --force      # 캐시 무시하고 재수집
+h1scout fetch --dry-run    # 실제 수집 없이 확인만
 ```
 
-> 590개 프로그램의 scope를 동시 5개씩 수집합니다.
-> rate limit 실패 시 10초 대기 후 자동 재시도 (최대 5라운드).
+> `list`, `select` 명령어는 cache가 비어있으면 자동으로 fetch를 수행합니다.
+> 590개 프로그램의 scope를 동시 5개씩 수집, rate limit 실패 시 10초 대기 후 자동 재시도 (최대 5라운드).
 
 ### 3. 스코어 순 목록 확인
 
 ```bash
-./target/release/h1scout list --top 10              # 상위 10개
-./target/release/h1scout list --top 20 --min-scopes 3  # web scope 3개 이상만
-./target/release/h1scout list --format json          # JSON 출력
-./target/release/h1scout list --format csv           # CSV 출력
+h1scout list --top 10                   # 상위 10개
+h1scout list --top 20 --min-scopes 3    # web scope 3개 이상만
+h1scout list --format json              # JSON 출력
+h1scout list --format csv               # CSV 출력
 
 # 파일로 저장
-./target/release/h1scout export --format json --output results.json
-./target/release/h1scout export --format csv --output results.csv
+h1scout export --format json --output results.json
+h1scout export --format csv --output results.csv
 ```
 
-### 4. BBP 선택 → Recon 실행
+### 4. BBP 선택 → Recon 실행 → 자동 Review
 
 ```bash
-./target/release/h1scout select                            # 기본 (boundary SKILL + nuclei)
-SKIP_NUCLEI=1 ./target/release/h1scout select              # nuclei 스킵 (WAF에 막힐 때)
-AP_SKILL=vuln ./target/release/h1scout select              # legacy vuln SKILL 사용
-SKIP_NUCLEI=1 AP_SKILL=vuln ./target/release/h1scout select # 둘 다 적용
+h1scout select                       # 기본: boundary SKILL + nuclei + 자동 review
+h1scout select --skip-nuclei         # nuclei 스킵 (WAF 차단 시 권장)
+h1scout select --skill vuln          # legacy vuln SKILL 사용
+h1scout select --no-review           # 자동 review TUI 비활성
 ```
 
 1. 스코어 순으로 BBP 목록 표시 (web scope 없는 프로그램은 제외)
 2. `↑↓` 이동, `Space` 선택, `Enter` 확정
 3. 선택된 BBP마다 5단계 Recon 파이프라인 자동 실행
-4. 완료 시 `~/.h1scout/projects/{handle}_{날짜}/RR.json` 생성
+4. 완료 시 자동으로 review TUI 진입 (`--no-review`로 끌 수 있음)
 
 > BBOT은 도메인당 3~10분, nuclei는 호스트 수에 따라 5~20분 소요됩니다.
-> WAF(Imperva, Cloudflare 등) 뒤에 있으면 nuclei가 대부분 차단되므로 `SKIP_NUCLEI=1` 권장.
+> WAF(Imperva, Cloudflare 등) 뒤에 있으면 nuclei가 대부분 차단되므로 `--skip-nuclei` 권장.
 
-### 5. 결과 리뷰 → Auto-Solve 입력 생성
+### 5. recon 재실행 (실패 시 / SKILL 비교)
 
 ```bash
-./target/release/h1scout review                              # TUI에서 프로젝트 선택
-./target/release/h1scout review --project-id varonis_20260409  # 특정 프로젝트 지정
+h1scout recon --project-id varonis_20260409              # 전체 recon 재실행
+h1scout recon --project-id varonis_20260409 --only-ap    # LLM AP 식별만 재실행
+h1scout recon --project-id varonis_20260409 --only-ap --skill vuln  # 다른 SKILL 비교
+```
+
+`--only-ap`는 BBOT/httpx/gau/nuclei 단계 건너뛰고 기존 recon 데이터로 LLM만 다시 호출합니다. SKILL 비교 실험에 유용.
+
+### 6. 프로젝트 목록 조회
+
+```bash
+h1scout projects             # 완료된 프로젝트 전체
+h1scout projects --latest    # 가장 최근 1개
+```
+
+### 7. 결과 리뷰 → Auto-Solve 입력 생성
+
+`select`에서 자동 진입하지만 따로 호출도 가능:
+
+```bash
+h1scout review                                # TUI에서 프로젝트 선택
+h1scout review --project-id varonis_20260409  # 특정 프로젝트 지정
 ```
 
 1. RR.json의 Attack Point 목록을 TUI로 표시

@@ -40,6 +40,88 @@ fn get_projects_dir(override_dir: Option<&str>) -> String {
     dir.to_string_lossy().to_string()
 }
 
+/// Fetch all programs and scopes from H1 API, store in cache.
+/// Used by both Fetch command and auto-fetch logic.
+async fn do_fetch(cache: &Cache, db_path: &str) -> Result<()> {
+    let username = std::env::var("H1_USERNAME")
+        .map_err(|_| anyhow::anyhow!("H1_USERNAME env var required"))?;
+    let api_token = std::env::var("H1_API_TOKEN")
+        .map_err(|_| anyhow::anyhow!("H1_API_TOKEN env var required"))?;
+
+    let client = H1Client::new(&username, &api_token);
+
+    println!("Fetching programs from H1 API...");
+    let programs = client.fetch_all_programs().await?;
+    println!("Fetched {} programs.", programs.len());
+
+    cache.upsert_programs(&programs).await?;
+
+    let pb = indicatif::ProgressBar::new(programs.len() as u64);
+    pb.set_style(indicatif::ProgressStyle::default_bar()
+        .template("[{elapsed_precise}] {bar:40} {pos}/{len} scopes fetched")
+        .unwrap());
+
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(5));
+    let client = std::sync::Arc::new(client);
+    let mut pending: Vec<String> = programs.iter().map(|p| p.attributes.handle.clone()).collect();
+    let total = pending.len();
+    let mut done = 0usize;
+    let mut round = 1;
+    let max_rounds = 5;
+
+    while !pending.is_empty() && round <= max_rounds {
+        if round > 1 {
+            println!("Round {} — retrying {} failed scopes (waiting 10s)...", round, pending.len());
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        }
+
+        let mut handles = Vec::new();
+        for handle in &pending {
+            let sem = semaphore.clone();
+            let client = client.clone();
+            let handle = handle.clone();
+            let h = tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                let scopes = client.fetch_scopes(&handle).await;
+                (handle, scopes)
+            });
+            handles.push(h);
+        }
+
+        let mut failed = Vec::new();
+        for h in handles {
+            let (handle, scopes_result) = h.await?;
+            match scopes_result {
+                Ok(scopes) => {
+                    cache.upsert_scopes(&handle, &scopes).await?;
+                    done += 1;
+                }
+                Err(_) => failed.push(handle),
+            }
+            pb.inc(1);
+        }
+        pending = failed;
+        round += 1;
+    }
+    pb.finish_and_clear();
+
+    if !pending.is_empty() {
+        eprintln!("Warning: {} scopes could not be fetched after {} rounds", pending.len(), max_rounds);
+    }
+    println!("Done. {}/{} scopes cached at {}", done, total, db_path);
+    Ok(())
+}
+
+/// Auto-fetch if cache is empty. Used by list/select.
+async fn ensure_cache_populated(cache: &Cache, db_path: &str) -> Result<()> {
+    let programs = cache.get_all_programs().await?;
+    if programs.is_empty() {
+        println!("Cache is empty. Auto-fetching from H1 API...");
+        do_fetch(cache, db_path).await?;
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -60,84 +142,12 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
 
-            let username = std::env::var("H1_USERNAME")
-                .expect("H1_USERNAME env var required");
-            let api_token = std::env::var("H1_API_TOKEN")
-                .expect("H1_API_TOKEN env var required");
-
-            let client = H1Client::new(&username, &api_token);
-
-            println!("Fetching programs...");
-            let programs = client.fetch_all_programs().await?;
-            println!("Fetched {} programs.", programs.len());
-
-            cache.upsert_programs(&programs).await?;
-
-            // Concurrent scope fetching with retry queue
-            let client = std::sync::Arc::new(client);
-            let mut pending: Vec<String> = programs.iter().map(|p| p.attributes.handle.clone()).collect();
-            let total = pending.len();
-            let mut done = 0usize;
-            let mut round = 1;
-
-            let max_rounds = 3;
-            while !pending.is_empty() && round <= max_rounds {
-                if round > 1 {
-                    println!("Round {} — retrying {} failed scopes (waiting 10s)...", round, pending.len());
-                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                }
-
-                let pb = indicatif::ProgressBar::new(pending.len() as u64);
-                pb.set_style(indicatif::ProgressStyle::default_bar()
-                    .template(&format!("[{{elapsed_precise}}] {{bar:40}} {{pos}}/{{len}} (round {})", round))
-                    .unwrap());
-
-                let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(5));
-                let mut handles = Vec::new();
-
-                for handle in &pending {
-                    let sem = semaphore.clone();
-                    let client = client.clone();
-                    let handle = handle.clone();
-
-                    let h = tokio::spawn(async move {
-                        let _permit = sem.acquire().await.unwrap();
-                        let scopes = client.fetch_scopes(&handle).await;
-                        (handle, scopes)
-                    });
-                    handles.push(h);
-                }
-
-                let mut failed = Vec::new();
-                for h in handles {
-                    let (handle, scopes_result) = h.await?;
-                    match scopes_result {
-                        Ok(scopes) => {
-                            cache.upsert_scopes(&handle, &scopes).await?;
-                            done += 1;
-                        }
-                        Err(_) => {
-                            failed.push(handle);
-                        }
-                    }
-                    pb.inc(1);
-                }
-
-                pb.finish_and_clear();
-                println!("Round {} done — {}/{} total, {} failed", round, done, total, failed.len());
-
-                pending = failed;
-                round += 1;
-            }
-
-            if !pending.is_empty() {
-                eprintln!("Warning: {} scopes could not be fetched after {} rounds: {:?}", pending.len(), max_rounds, pending);
-            }
-            println!("Done. {}/{} scopes cached at {}", done, total, db_path);
+            do_fetch(&cache, &db_path).await?;
         }
 
         Commands::List { top, min_scopes, format } => {
             let cache = Cache::new(&db_path).await?;
+            ensure_cache_populated(&cache, &db_path).await?;
             let weights = Weights::from_config(&config_path);
             let programs = cache.get_all_programs().await?;
             let min = min_scopes.unwrap_or(1);
@@ -175,6 +185,7 @@ async fn main() -> Result<()> {
 
         Commands::Export { format, output: out_path } => {
             let cache = Cache::new(&db_path).await?;
+            ensure_cache_populated(&cache, &db_path).await?;
             let weights = Weights::from_config(&config_path);
             let programs = cache.get_all_programs().await?;
 
@@ -206,12 +217,58 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Select { projects_dir } => {
+        Commands::Select { projects_dir, skip_nuclei, skill, no_review } => {
             let projects_dir = get_projects_dir(projects_dir.as_deref());
             let cache = Cache::new(&db_path).await?;
+            ensure_cache_populated(&cache, &db_path).await?;
             let weights = Weights::from_config(&config_path);
 
-            select::run_select(&cache, &weights, &projects_dir).await?;
+            let opts = recon::ReconOptions {
+                skip_nuclei: skip_nuclei || std::env::var("SKIP_NUCLEI").is_ok(),
+                skill,
+            };
+
+            select::run_select(&cache, &weights, &projects_dir, opts, !no_review).await?;
+        }
+
+        Commands::Recon { project_id, only_ap, skip_nuclei, skill } => {
+            let projects_dir = get_projects_dir(None);
+            let project_dir = std::path::Path::new(&projects_dir).join(&project_id);
+
+            let opts = recon::ReconOptions {
+                skip_nuclei: skip_nuclei || std::env::var("SKIP_NUCLEI").is_ok(),
+                skill,
+            };
+
+            if only_ap {
+                recon::run_recon_ap_only(&project_dir, opts).await?;
+            } else {
+                recon::run_recon(&project_dir, opts).await?;
+            }
+        }
+
+        Commands::Projects { latest } => {
+            let projects_dir = get_projects_dir(None);
+            let projects = review::find_completed_projects(std::path::Path::new(&projects_dir))?;
+
+            if projects.is_empty() {
+                println!("No completed projects found at {}", projects_dir);
+                return Ok(());
+            }
+
+            let to_show = if latest { &projects[..1] } else { &projects[..] };
+
+            println!("{:30}  {:>6}  {:>5}  Created", "Project", "Score", "APs");
+            println!("{}", "─".repeat(70));
+            for (name, rr) in to_show {
+                println!(
+                    "{:30}  {:>6.1}  {:>5}  {}",
+                    name,
+                    rr.bbp.score,
+                    rr.attack_points.len(),
+                    &rr.created_at[..rr.created_at.len().min(19)],
+                );
+            }
         }
 
         Commands::Review { project_id } => {

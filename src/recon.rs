@@ -94,19 +94,42 @@ pub fn get_bbot_flags(scopes: &[WebScope]) -> Vec<String> {
     }
 }
 
+// ── Recon Options ──
+
+#[derive(Debug, Clone)]
+pub struct ReconOptions {
+    pub skip_nuclei: bool,
+    pub skill: String,
+}
+
+impl Default for ReconOptions {
+    fn default() -> Self {
+        Self {
+            skip_nuclei: std::env::var("SKIP_NUCLEI").is_ok(),
+            skill: std::env::var("AP_SKILL").unwrap_or_else(|_| "boundary".to_string()),
+        }
+    }
+}
+
 // ── Recon Runner ──
 
 pub struct ReconRunner {
     pub project_dir: PathBuf,
     pub recon_dir: PathBuf,
+    pub opts: ReconOptions,
 }
 
 impl ReconRunner {
     pub fn new(project_dir: &Path) -> Self {
+        Self::with_opts(project_dir, ReconOptions::default())
+    }
+
+    pub fn with_opts(project_dir: &Path, opts: ReconOptions) -> Self {
         let recon_dir = project_dir.join("recon");
         Self {
             project_dir: project_dir.to_path_buf(),
             recon_dir,
+            opts,
         }
     }
 
@@ -339,10 +362,9 @@ impl ReconRunner {
 
     /// Step 4: Nuclei scan
     pub fn run_nuclei(&self) -> Result<Vec<String>> {
-        // Skip if SKIP_NUCLEI env var is set
-        if std::env::var("SKIP_NUCLEI").is_ok() {
-            println!("[4/5] Skipped nuclei (SKIP_NUCLEI set)");
-            // Create empty file so downstream steps don't fail
+        // Skip if option is set
+        if self.opts.skip_nuclei {
+            println!("[4/5] Skipped nuclei");
             std::fs::write(self.recon_dir.join("nuclei.txt"), "").ok();
             return Ok(vec![]);
         }
@@ -395,8 +417,8 @@ impl ReconRunner {
         let nuclei = self.read_file_lines("nuclei.txt");
 
         // Read the AP identifier skill (boundary is default, vuln is legacy)
-        let skill_content = match std::env::var("AP_SKILL").as_deref() {
-            Ok("vuln") => include_str!("../SKILL/ap-identifier-SKILL.md"),
+        let skill_content = match self.opts.skill.as_str() {
+            "vuln" => include_str!("../SKILL/ap-identifier-SKILL.md"),
             _ => include_str!("../SKILL/ap-identifier-boundary-SKILL.md"),
         };
 
@@ -501,8 +523,8 @@ impl ReconRunner {
 }
 
 /// Main entry point for recon pipeline
-pub async fn run_recon(project_dir: &Path) -> Result<()> {
-    let runner = ReconRunner::new(project_dir);
+pub async fn run_recon(project_dir: &Path, opts: ReconOptions) -> Result<()> {
+    let runner = ReconRunner::with_opts(project_dir, opts);
 
     // Read rule.csv to get targets
     let rule_csv = std::fs::read_to_string(project_dir.join("rule.csv"))
@@ -559,6 +581,29 @@ pub async fn run_recon(project_dir: &Path) -> Result<()> {
     // 6. Generate RR.json
     let rr_path = runner.generate_rr(attack_points)?;
     println!("\nRR.json generated: {}", rr_path.display());
+
+    Ok(())
+}
+
+/// Re-run only the LLM AP identification step on existing recon data.
+/// Useful for retrying with a different SKILL or after LLM failure.
+pub async fn run_recon_ap_only(project_dir: &Path, opts: ReconOptions) -> Result<()> {
+    if !project_dir.exists() {
+        return Err(anyhow!("Project directory not found: {}", project_dir.display()));
+    }
+    let recon_dir = project_dir.join("recon");
+    if !recon_dir.exists() {
+        return Err(anyhow!("recon/ directory not found — run full recon first"));
+    }
+
+    let runner = ReconRunner::with_opts(project_dir, opts);
+
+    println!("\n=== AP re-identification: {} ===\n", project_dir.file_name().unwrap_or_default().to_string_lossy());
+    println!("Using SKILL: {}", runner.opts.skill);
+
+    let attack_points = runner.run_ap_identification()?;
+    let rr_path = runner.generate_rr(attack_points)?;
+    println!("\nRR.json regenerated: {}", rr_path.display());
 
     Ok(())
 }
