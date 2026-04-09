@@ -386,8 +386,11 @@ impl ReconRunner {
         let js_endpoints = self.read_file_lines("js_endpoints.txt");
         let nuclei = self.read_file_lines("nuclei.txt");
 
-        // Read the AP identifier skill
-        let skill_content = include_str!("../SKILL/ap-identifier-SKILL.md");
+        // Read the AP identifier skill (select via AP_SKILL env var)
+        let skill_content = match std::env::var("AP_SKILL").as_deref() {
+            Ok("boundary") => include_str!("../SKILL/ap-identifier-boundary-SKILL.md"),
+            _ => include_str!("../SKILL/ap-identifier-SKILL.md"),
+        };
 
         let prompt = format!(
             "{}\n\n---\n\n## Recon Data\n\n### Live Hosts\n{}\n\n### URLs (sample, first 200)\n{}\n\n### JS Endpoints\n{}\n\n### Nuclei Results\n{}\n\n---\n\nAnalyze the above recon data. Return ONLY a JSON array of attack points. No other text.",
