@@ -95,12 +95,28 @@ Total = Bounty×0.20 + WebScope×0.30 + Health×0.20 + Response×0.10 + Difficul
 
 ## 설치
 
+### 필수: Rust 툴체인 (cargo)
+
+h1scout는 Rust로 빌드됩니다. **Rust 1.80 이상**이 필요합니다.
+
+```bash
+# rustup으로 설치 (권장)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+
+# 버전 확인
+rustc --version   # 1.80.0 이상 필요
+cargo --version
+```
+
+> **주의**: `apt install cargo`로 설치하면 1.75 등 오래된 버전이 설치되어 빌드가 실패합니다. 반드시 [rustup](https://rustup.rs/)을 사용하세요.
+
 ### 원커맨드 설치 (Linux amd64)
 
 ```bash
 git clone <repo-url>
 cd Auto-Recon
-./setup.sh
+bash setup.sh
 ```
 
 Rust, Go, BBOT, gau, waybackurls, httpx, nuclei, linkfinder 전부 설치하고 `h1scout` 빌드까지 자동으로 수행합니다.
@@ -120,6 +136,7 @@ cargo install --path .   # ~/.cargo/bin/h1scout 에 설치
 ### 요구 사항
 
 - Linux amd64 (Ubuntu/Debian/Kali)
+- **Rust 1.80+** (rustup으로 설치)
 - git, python3, pip, curl, wget
 - HackerOne API 키 (fetch 단계)
 - claude CLI (LLM AP 식별 단계)
@@ -130,7 +147,7 @@ cargo install --path .   # ~/.cargo/bin/h1scout 에 설치
 <summary>setup.sh 없이 직접 설치하는 경우</summary>
 
 ```bash
-# Rust
+# Rust (1.80 이상 필수)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source "$HOME/.cargo/env"
 

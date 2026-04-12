@@ -1,7 +1,11 @@
 use anyhow::Result;
 use chrono::Local;
+use indicatif::MultiProgress;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 use crate::api::models::{ScopeData, ProgramData};
 use crate::db::cache::Cache;

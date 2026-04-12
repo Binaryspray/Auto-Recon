@@ -11,6 +11,7 @@ pub mod llm;
 
 use anyhow::Result;
 use clap::Parser;
+use dotenvy::dotenv;
 
 use cli::{Cli, Commands, OutputFormat};
 use api::client::H1Client;
@@ -124,6 +125,7 @@ async fn ensure_cache_populated(cache: &Cache, db_path: &str) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    dotenv().ok();
     let cli = Cli::parse();
     let db_path = get_db_path();
     let config_path = get_config_path();
