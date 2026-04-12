@@ -1,10 +1,14 @@
 use anyhow::{anyhow, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::process::Command;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 use crate::select::WebScope;
 
@@ -96,18 +100,48 @@ pub fn get_bbot_flags(scopes: &[WebScope]) -> Vec<String> {
 
 // ── Recon Runner ──
 
+#[derive(Clone)]
 pub struct ReconRunner {
     pub project_dir: PathBuf,
     pub recon_dir: PathBuf,
+    pub force: bool,
+    pub skip_steps: HashSet<String>,
 }
 
 impl ReconRunner {
-    pub fn new(project_dir: &Path) -> Self {
+    pub fn new(project_dir: &Path, force: bool, skip_steps: HashSet<String>) -> Self {
         let recon_dir = project_dir.join("recon");
         Self {
             project_dir: project_dir.to_path_buf(),
             recon_dir,
+            force,
+            skip_steps,
         }
+    }
+
+    /// Check if a step's output file exists and is non-empty
+    pub fn step_done(&self, filename: &str) -> bool {
+        if self.force {
+            return false;
+        }
+        let path = self.recon_dir.join(filename);
+        path.exists() && path.metadata().map(|m| m.len() > 0).unwrap_or(false)
+    }
+
+    /// Check if a step's marker file exists (for steps with possibly empty output)
+    fn marker_done(&self, marker: &str) -> bool {
+        if self.force {
+            return false;
+        }
+        self.recon_dir.join(marker).exists()
+    }
+
+    /// Sanitize domain name for use as checkpoint filename
+    fn sanitize_domain(domain: &str) -> String {
+        domain
+            .trim_start_matches("*.")
+            .replace('.', "_")
+            .replace('*', "wildcard")
     }
 
     fn progress_bar(&self, step: u8, total: u8, msg: &str) -> ProgressBar {
@@ -131,12 +165,13 @@ impl ReconRunner {
         )
     }
 
-    fn run_cmd(&self, cmd: &str, args: &[&str]) -> Result<String> {
+    async fn run_cmd(&self, cmd: &str, args: &[&str]) -> Result<String> {
         let output = Command::new(cmd)
             .args(args)
             .current_dir(&self.recon_dir)
             .env("PATH", Self::extended_path())
-            .output()?;
+            .output()
+            .await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -156,10 +191,39 @@ impl ReconRunner {
             .collect()
     }
 
-    /// Step 1: Subdomain enumeration with BBOT
-    pub fn run_bbot(&self, targets: &[String], bbot_flags: &[String]) -> Result<Vec<String>> {
+    /// Parse BBOT output into subdomain list
+    fn parse_bbot_output(output: &str) -> Vec<String> {
+        let mut subs = Vec::new();
+        for line in output.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                let etype = val["type"].as_str().unwrap_or("");
+                if etype == "DNS_NAME" || etype == "URL_UNVERIFIED" {
+                    if let Some(data) = val["data"].as_str() {
+                        let host = data.trim_start_matches("http://")
+                            .trim_start_matches("https://")
+                            .split('/')
+                            .next()
+                            .unwrap_or(data);
+                        if !host.is_empty() {
+                            subs.push(host.to_string());
+                        }
+                    }
+                }
+            } else {
+                subs.push(trimmed.to_string());
+            }
+        }
+        subs
+    }
+
+    /// Step 1: Subdomain enumeration with BBOT (parallel, per-domain checkpoints)
+    pub async fn run_bbot(&self, targets: &[String], bbot_flags: &[String]) -> Result<Vec<String>> {
         let total = targets.len();
-        let pb = ProgressBar::new(total as u64);
+        let pb = Arc::new(ProgressBar::new(total as u64));
         pb.set_style(
             ProgressStyle::default_bar()
                 .template("[1/5] {bar:30} {pos}/{len} domains — {msg}")
@@ -167,59 +231,95 @@ impl ReconRunner {
         );
         pb.set_message("BBOT subdomain enumeration");
 
-        let mut all_subdomains = Vec::new();
-
-        for (i, target) in targets.iter().enumerate() {
-            let domain = target.trim_start_matches("*.");
-            pb.set_message(domain.to_string());
-
-            let mut args = vec![
-                "-t".to_string(), domain.to_string(),
-                "--silent".to_string(),
-                "--fast-mode".to_string(),
-                "--force".to_string(),
-                "-f".to_string(), "subdomain-enum".to_string(),
-                "--json".to_string(),
-            ];
-            args.extend(bbot_flags.iter().cloned());
-
-            match self.run_cmd("bbot", &args.iter().map(|s| s.as_str()).collect::<Vec<_>>()) {
-                Ok(output) => {
-                    for line in output.lines() {
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        // Parse BBOT JSON output — extract DNS_NAME and URL_UNVERIFIED hosts
-                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                            let etype = val["type"].as_str().unwrap_or("");
-                            if etype == "DNS_NAME" || etype == "URL_UNVERIFIED" {
-                                if let Some(data) = val["data"].as_str() {
-                                    let host = data.trim_start_matches("http://")
-                                        .trim_start_matches("https://")
-                                        .split('/')
-                                        .next()
-                                        .unwrap_or(data);
-                                    if !host.is_empty() {
-                                        all_subdomains.push(host.to_string());
-                                    }
-                                }
-                            }
-                        } else {
-                            // Fallback: treat as plain subdomain
-                            all_subdomains.push(trimmed.to_string());
-                        }
+        // Clean per-domain checkpoints if force
+        if self.force {
+            for entry in std::fs::read_dir(&self.recon_dir).into_iter().flatten() {
+                if let Ok(e) = entry {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if name.starts_with("bbot_") && name.ends_with(".txt") {
+                        let _ = std::fs::remove_file(e.path());
                     }
                 }
-                Err(e) => eprintln!("\nBBOT failed for {}: {}", domain, e),
             }
-            pb.set_position((i + 1) as u64);
+        }
+
+        let sem = Arc::new(Semaphore::new(5));
+        let mut join_set = JoinSet::new();
+
+        for target in targets.iter() {
+            let domain = target.trim_start_matches("*.").to_string();
+            let checkpoint = format!("bbot_{}.txt", Self::sanitize_domain(&domain));
+            let checkpoint_path = self.recon_dir.join(&checkpoint);
+            let recon_dir = self.recon_dir.clone();
+            let force = self.force;
+            let bbot_flags = bbot_flags.to_vec();
+            let pb = pb.clone();
+            let sem = sem.clone();
+
+            join_set.spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+
+                // Per-domain checkpoint
+                if !force && checkpoint_path.exists() && checkpoint_path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+                    let cached: Vec<String> = std::fs::read_to_string(&checkpoint_path)
+                        .unwrap_or_default()
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(|l| l.trim().to_string())
+                        .collect();
+                    pb.inc(1);
+                    return cached;
+                }
+
+                let mut args = vec![
+                    "-t".to_string(), domain.clone(),
+                    "--silent".to_string(),
+                    "--fast-mode".to_string(),
+                    "--force".to_string(),
+                    "-f".to_string(), "subdomain-enum".to_string(),
+                    "--json".to_string(),
+                ];
+                args.extend(bbot_flags.iter().cloned());
+
+                let output = Command::new("bbot")
+                    .args(&args)
+                    .current_dir(&recon_dir)
+                    .env("PATH", Self::extended_path())
+                    .output()
+                    .await;
+
+                let domain_subs = match output {
+                    Ok(out) => {
+                        if !out.status.success() {
+                            let stderr = String::from_utf8_lossy(&out.stderr);
+                            eprintln!("Warning: bbot failed for {}: {}", domain, stderr.trim());
+                        }
+                        let stdout = String::from_utf8_lossy(&out.stdout);
+                        let subs = Self::parse_bbot_output(&stdout);
+                        let _ = std::fs::write(&checkpoint_path, subs.join("\n"));
+                        subs
+                    }
+                    Err(e) => {
+                        eprintln!("BBOT failed for {}: {}", domain, e);
+                        vec![]
+                    }
+                };
+
+                pb.inc(1);
+                domain_subs
+            });
+        }
+
+        let mut all_subdomains = Vec::new();
+        while let Some(result) = join_set.join_next().await {
+            if let Ok(subs) = result {
+                all_subdomains.extend(subs);
+            }
         }
 
         all_subdomains.sort();
         all_subdomains.dedup();
 
-        // Save
         std::fs::write(
             self.recon_dir.join("subdomains.txt"),
             all_subdomains.join("\n"),
@@ -230,7 +330,7 @@ impl ReconRunner {
     }
 
     /// Step 2: Filter live hosts with httpx
-    pub fn run_httpx(&self, subdomains: &[String]) -> Result<Vec<String>> {
+    pub async fn run_httpx(&self, subdomains: &[String]) -> Result<Vec<String>> {
         let pb = self.progress_bar(2, 5, "Live host detection (httpx)...");
 
         let input = subdomains.join("\n");
@@ -246,48 +346,83 @@ impl ReconRunner {
                 "-web-server", "-ip", "-cname",
                 "-o", &self.recon_dir.join("live_hosts.txt").to_string_lossy(),
             ],
-        );
+        ).await;
 
         let live = self.read_file_lines("live_hosts.txt");
         pb.finish_with_message(format!("Found {} live hosts", live.len()));
         Ok(live)
     }
 
-    /// Step 3: URL collection (gau + waybackurls)
-    pub fn run_url_collection(&self, targets: &[String]) -> Result<Vec<String>> {
+    /// Step 3: URL collection (parallel gau + waybackurls per domain, parallel linkfinder)
+    pub async fn run_url_collection(&self, targets: &[String]) -> Result<Vec<String>> {
         let total = targets.len();
-        let pb = ProgressBar::new(total as u64);
+        let pb = Arc::new(ProgressBar::new(total as u64));
         pb.set_style(
             ProgressStyle::default_bar()
                 .template("[3/5] {bar:30} {pos}/{len} domains — {msg}")
                 .unwrap(),
         );
-        pb.set_message("URL collection");
+        pb.set_message("URL collection (gau + waybackurls)");
+
+        // Parallel URL collection per domain
+        let sem = Arc::new(Semaphore::new(5));
+        let mut join_set = JoinSet::new();
+
+        for target in targets.iter() {
+            let domain = target.trim_start_matches("*.").to_string();
+            let recon_dir = self.recon_dir.clone();
+            let pb = pb.clone();
+            let sem = sem.clone();
+
+            join_set.spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                let extended_path = Self::extended_path();
+                let mut urls = Vec::new();
+
+                // Run gau and waybackurls concurrently for same domain
+                let gau_future = Command::new("gau")
+                    .args([&domain, "--subs"])
+                    .current_dir(&recon_dir)
+                    .env("PATH", &extended_path)
+                    .output();
+
+                let wb_cmd = format!("echo {} | waybackurls", domain);
+                let wb_future = Command::new("sh")
+                    .args(["-c", &wb_cmd])
+                    .current_dir(&recon_dir)
+                    .env("PATH", &extended_path)
+                    .output();
+
+                let (gau_result, wb_result) = tokio::join!(gau_future, wb_future);
+
+                if let Ok(out) = gau_result {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    for line in stdout.lines() {
+                        if !line.trim().is_empty() {
+                            urls.push(line.trim().to_string());
+                        }
+                    }
+                }
+
+                if let Ok(out) = wb_result {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    for line in stdout.lines() {
+                        if !line.trim().is_empty() {
+                            urls.push(line.trim().to_string());
+                        }
+                    }
+                }
+
+                pb.inc(1);
+                urls
+            });
+        }
 
         let mut all_urls = Vec::new();
-
-        for (i, target) in targets.iter().enumerate() {
-            let domain = target.trim_start_matches("*.");
-            pb.set_message(domain.to_string());
-
-            // gau
-            if let Ok(output) = self.run_cmd("gau", &[domain, "--subs"]) {
-                for line in output.lines() {
-                    if !line.trim().is_empty() {
-                        all_urls.push(line.trim().to_string());
-                    }
-                }
+        while let Some(result) = join_set.join_next().await {
+            if let Ok(urls) = result {
+                all_urls.extend(urls);
             }
-
-            // waybackurls
-            if let Ok(output) = self.run_cmd("sh", &["-c", &format!("echo {} | waybackurls", domain)]) {
-                for line in output.lines() {
-                    if !line.trim().is_empty() {
-                        all_urls.push(line.trim().to_string());
-                    }
-                }
-            }
-            pb.set_position((i + 1) as u64);
         }
 
         all_urls.sort();
@@ -299,57 +434,93 @@ impl ReconRunner {
         )?;
 
         // Extract JS files
-        let js_files: Vec<&String> = all_urls.iter().filter(|u| {
+        let js_files: Vec<String> = all_urls.iter().filter(|u| {
             u.to_lowercase().ends_with(".js") || u.to_lowercase().contains(".js?")
-        }).collect();
+        }).cloned().collect();
 
         std::fs::write(
             self.recon_dir.join("js_files.txt"),
-            js_files.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n"),
+            js_files.join("\n"),
         )?;
 
-        // linkfinder on JS files
-        let mut js_endpoints = Vec::new();
-        for js_url in &js_files {
-            if let Ok(output) = self.run_cmd("linkfinder", &[
-                "-i", js_url, "-o", "cli",
-            ]) {
-                for line in output.lines() {
-                    if !line.trim().is_empty() {
-                        js_endpoints.push(line.trim().to_string());
+        pb.finish_with_message(format!("Collected {} URLs, {} JS files", all_urls.len(), js_files.len()));
+
+        // Parallel linkfinder on JS files
+        if !js_files.is_empty() {
+            let lf_pb = ProgressBar::new(js_files.len() as u64);
+            lf_pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("[3/5] {bar:30} {pos}/{len} JS files — linkfinder")
+                    .unwrap(),
+            );
+
+            let lf_sem = Arc::new(Semaphore::new(10));
+            let mut lf_set = JoinSet::new();
+            let lf_pb = Arc::new(lf_pb);
+
+            for js_url in js_files.iter() {
+                let js_url = js_url.clone();
+                let recon_dir = self.recon_dir.clone();
+                let lf_sem = lf_sem.clone();
+                let lf_pb = lf_pb.clone();
+
+                lf_set.spawn(async move {
+                    let _permit = lf_sem.acquire().await.unwrap();
+                    let output = Command::new("linkfinder")
+                        .args(["-i", &js_url, "-o", "cli"])
+                        .current_dir(&recon_dir)
+                        .env("PATH", Self::extended_path())
+                        .output()
+                        .await;
+
+                    let mut endpoints = Vec::new();
+                    if let Ok(out) = output {
+                        let stdout = String::from_utf8_lossy(&out.stdout);
+                        for line in stdout.lines() {
+                            if !line.trim().is_empty() {
+                                endpoints.push(line.trim().to_string());
+                            }
+                        }
                     }
+                    lf_pb.inc(1);
+                    endpoints
+                });
+            }
+
+            let mut js_endpoints = Vec::new();
+            while let Some(result) = lf_set.join_next().await {
+                if let Ok(eps) = result {
+                    js_endpoints.extend(eps);
                 }
             }
+            js_endpoints.sort();
+            js_endpoints.dedup();
+
+            std::fs::write(
+                self.recon_dir.join("js_endpoints.txt"),
+                js_endpoints.join("\n"),
+            )?;
+
+            lf_pb.finish_with_message(format!("{} JS endpoints found", js_endpoints.len()));
+        } else {
+            std::fs::write(self.recon_dir.join("js_endpoints.txt"), "")?;
         }
-        js_endpoints.sort();
-        js_endpoints.dedup();
 
-        std::fs::write(
-            self.recon_dir.join("js_endpoints.txt"),
-            js_endpoints.join("\n"),
-        )?;
-
-        pb.finish_with_message(format!(
-            "Collected {} URLs, {} JS endpoints",
-            all_urls.len(),
-            js_endpoints.len()
-        ));
         Ok(all_urls)
     }
 
     /// Step 4: Nuclei scan
-    pub fn run_nuclei(&self) -> Result<Vec<String>> {
+    pub async fn run_nuclei(&self) -> Result<Vec<String>> {
         let live_hosts_path = self.recon_dir.join("live_hosts.txt");
         if !live_hosts_path.exists() {
             println!("[4/5] Skipped nuclei — no live hosts");
             return Ok(vec![]);
         }
 
-        println!("[4/5] Nuclei scan running (stats every 10s)...");
+        let pb = self.progress_bar(4, 5, "Nuclei scan running...");
 
         let output_path = self.recon_dir.join("nuclei.txt");
-        // Run nuclei with inherited stderr so stats print to terminal
-        let status = Command::new("nuclei")
+        let output = Command::new("nuclei")
             .args([
                 "-l", &live_hosts_path.to_string_lossy(),
                 "-tags", "exposure,config,misconfig,token,secret,info,takeover,cname",
@@ -362,22 +533,23 @@ impl ReconRunner {
             ])
             .current_dir(&self.recon_dir)
             .env("PATH", Self::extended_path())
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status();
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await;
 
-        if let Err(e) = status {
+        if let Err(e) = output {
             eprintln!("Warning: nuclei failed: {}", e);
         }
 
         let results = self.read_file_lines("nuclei.txt");
-        println!("[4/5] Nuclei found {} results", results.len());
+        pb.finish_with_message(format!("Nuclei found {} results", results.len()));
         Ok(results)
     }
 
     /// Step 5: LLM AP identification
-    pub fn run_ap_identification(&self) -> Result<Vec<AttackPoint>> {
+    pub async fn run_ap_identification(&self) -> Result<Vec<AttackPoint>> {
         let pb = self.progress_bar(5, 5, "AP identification (claude --print)...");
 
         // Gather all recon data
@@ -398,7 +570,7 @@ impl ReconRunner {
             nuclei.join("\n"),
         );
 
-        let response = crate::llm::query(&prompt, &self.project_dir);
+        let response = crate::llm::query(&prompt, &self.project_dir).await;
 
         let attack_points = match response {
             Ok(text) => {
@@ -490,8 +662,8 @@ impl ReconRunner {
 }
 
 /// Main entry point for recon pipeline
-pub async fn run_recon(project_dir: &Path) -> Result<()> {
-    let runner = ReconRunner::new(project_dir);
+pub async fn run_recon(project_dir: &Path, force: bool, skip_steps: &HashSet<String>) -> Result<()> {
+    let runner = ReconRunner::new(project_dir, force, skip_steps.clone());
 
     // Read rule.csv to get targets
     let rule_csv = std::fs::read_to_string(project_dir.join("rule.csv"))
@@ -531,19 +703,63 @@ pub async fn run_recon(project_dir: &Path) -> Result<()> {
     println!("\n=== Auto-Recon: {} ===\n", project_dir.file_name().unwrap_or_default().to_string_lossy());
 
     // 1. Subdomain enumeration
-    let subdomains = runner.run_bbot(&targets, &bbot_flags)?;
+    let subdomains = if runner.skip_steps.contains("bbot") {
+        println!("[1/5] Skipped BBOT (--skip bbot)");
+        runner.read_file_lines("subdomains.txt")
+    } else if runner.step_done("subdomains.txt") {
+        println!("[1/5] Resuming — subdomains.txt exists");
+        runner.read_file_lines("subdomains.txt")
+    } else {
+        runner.run_bbot(&targets, &bbot_flags).await?
+    };
 
     // 2. Live host detection
-    let _live_hosts = runner.run_httpx(&subdomains)?;
+    let _live_hosts = if runner.skip_steps.contains("httpx") {
+        println!("[2/5] Skipped httpx (--skip httpx)");
+        runner.read_file_lines("live_hosts.txt")
+    } else if runner.step_done("live_hosts.txt") {
+        println!("[2/5] Resuming — live_hosts.txt exists");
+        runner.read_file_lines("live_hosts.txt")
+    } else {
+        runner.run_httpx(&subdomains).await?
+    };
 
     // 3. URL collection + JS analysis
-    let _urls = runner.run_url_collection(&targets)?;
+    let _urls = if runner.skip_steps.contains("urls") {
+        println!("[3/5] Skipped URL collection (--skip urls)");
+        runner.read_file_lines("urls.txt")
+    } else if runner.step_done("urls.txt") {
+        println!("[3/5] Resuming — urls.txt exists");
+        runner.read_file_lines("urls.txt")
+    } else {
+        runner.run_url_collection(&targets).await?
+    };
 
     // 4. Nuclei scan
-    let _nuclei = runner.run_nuclei()?;
+    let _nuclei = if runner.skip_steps.contains("nuclei") {
+        println!("[4/5] Skipped nuclei (--skip nuclei)");
+        runner.read_file_lines("nuclei.txt")
+    } else if runner.marker_done(".nuclei_done") {
+        println!("[4/5] Resuming — nuclei already completed");
+        runner.read_file_lines("nuclei.txt")
+    } else {
+        let results = runner.run_nuclei().await?;
+        let _ = std::fs::write(runner.recon_dir.join(".nuclei_done"), "");
+        results
+    };
 
     // 5. LLM AP identification
-    let attack_points = runner.run_ap_identification()?;
+    let rr_path = project_dir.join("RR.json");
+    let attack_points = if runner.skip_steps.contains("llm") {
+        println!("[5/5] Skipped LLM AP identification (--skip llm)");
+        vec![]
+    } else if !force && rr_path.exists() && rr_path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+        println!("[5/5] Resuming — RR.json exists");
+        println!("\nRR.json already exists: {}", rr_path.display());
+        return Ok(());
+    } else {
+        runner.run_ap_identification().await?
+    };
 
     // 6. Generate RR.json
     let rr_path = runner.generate_rr(attack_points)?;
@@ -653,7 +869,7 @@ mod tests {
             "identifier,asset_type,max_severity,instruction\n*.test.com,WILDCARD,critical,\n",
         ).unwrap();
 
-        let runner = ReconRunner::new(&project_dir);
+        let runner = ReconRunner::new(&project_dir, false, HashSet::new());
         let aps = vec![AttackPoint {
             ap_id: "ap_001".to_string(),
             url: "https://api.test.com/swagger".to_string(),
@@ -676,5 +892,62 @@ mod tests {
         assert_eq!(rr.bbp.handle, "test");
         assert_eq!(rr.attack_points.len(), 1);
         assert_eq!(rr.attack_points[0].category, "exposure");
+    }
+
+    #[test]
+    fn test_step_done_empty_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("test_proj");
+        let recon_dir = project_dir.join("recon");
+        std::fs::create_dir_all(&recon_dir).unwrap();
+        std::fs::write(recon_dir.join("subdomains.txt"), "").unwrap();
+
+        let runner = ReconRunner::new(&project_dir, false, HashSet::new());
+        assert!(!runner.step_done("subdomains.txt"));
+    }
+
+    #[test]
+    fn test_step_done_with_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("test_proj");
+        let recon_dir = project_dir.join("recon");
+        std::fs::create_dir_all(&recon_dir).unwrap();
+        std::fs::write(recon_dir.join("subdomains.txt"), "a.example.com\nb.example.com").unwrap();
+
+        let runner = ReconRunner::new(&project_dir, false, HashSet::new());
+        assert!(runner.step_done("subdomains.txt"));
+    }
+
+    #[test]
+    fn test_step_done_force_overrides() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("test_proj");
+        let recon_dir = project_dir.join("recon");
+        std::fs::create_dir_all(&recon_dir).unwrap();
+        std::fs::write(recon_dir.join("subdomains.txt"), "a.example.com").unwrap();
+
+        let runner = ReconRunner::new(&project_dir, true, HashSet::new());
+        assert!(!runner.step_done("subdomains.txt"));
+    }
+
+    #[test]
+    fn test_sanitize_domain() {
+        assert_eq!(ReconRunner::sanitize_domain("*.example.com"), "example_com");
+        assert_eq!(ReconRunner::sanitize_domain("api.test.io"), "api_test_io");
+        assert_eq!(ReconRunner::sanitize_domain("example.com"), "example_com");
+    }
+
+    #[test]
+    fn test_marker_done() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("test_proj");
+        let recon_dir = project_dir.join("recon");
+        std::fs::create_dir_all(&recon_dir).unwrap();
+
+        let runner = ReconRunner::new(&project_dir, false, HashSet::new());
+        assert!(!runner.marker_done(".nuclei_done"));
+
+        std::fs::write(recon_dir.join(".nuclei_done"), "").unwrap();
+        assert!(runner.marker_done(".nuclei_done"));
     }
 }

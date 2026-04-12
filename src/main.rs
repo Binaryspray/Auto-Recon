@@ -11,6 +11,7 @@ pub mod llm;
 
 use anyhow::Result;
 use clap::Parser;
+use dotenvy::dotenv;
 
 use cli::{Cli, Commands, OutputFormat};
 use api::client::H1Client;
@@ -42,6 +43,7 @@ fn get_projects_dir(override_dir: Option<&str>) -> String {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    dotenv().ok();
     let cli = Cli::parse();
     let db_path = get_db_path();
     let config_path = get_config_path();
@@ -206,12 +208,12 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Select { projects_dir } => {
+        Commands::Select { projects_dir, force, skip } => {
             let projects_dir = get_projects_dir(projects_dir.as_deref());
             let cache = Cache::new(&db_path).await?;
             let weights = Weights::from_config(&config_path);
 
-            select::run_select(&cache, &weights, &projects_dir).await?;
+            select::run_select(&cache, &weights, &projects_dir, force, skip).await?;
         }
 
         Commands::Review { project_id } => {

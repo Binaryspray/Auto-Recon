@@ -1,9 +1,10 @@
 use anyhow::{anyhow, Result};
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::io::Write;
+use tokio::process::Command;
+use std::process::Stdio;
+use tokio::io::AsyncWriteExt;
 
-pub fn query(prompt: &str, _cwd: &Path) -> Result<String> {
+pub async fn query(prompt: &str, _cwd: &Path) -> Result<String> {
     let mut child = Command::new("claude")
         .args(["--print", "--dangerously-skip-permissions", "-"])
         .stdin(Stdio::piped())
@@ -12,10 +13,10 @@ pub fn query(prompt: &str, _cwd: &Path) -> Result<String> {
         .spawn()?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(prompt.as_bytes())?;
+        stdin.write_all(prompt.as_bytes()).await?;
     }
 
-    let output = child.wait_with_output()?;
+    let output = child.wait_with_output().await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

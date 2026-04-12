@@ -1,7 +1,11 @@
 use anyhow::Result;
 use chrono::Local;
+use indicatif::MultiProgress;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 use crate::api::models::{ScopeData, ProgramData};
 use crate::db::cache::Cache;
@@ -110,7 +114,8 @@ pub fn init_project_dir(project_id: &str, base_dir: &Path, program: &ProgramData
     Ok(project_dir)
 }
 
-pub async fn run_select(cache: &Cache, weights: &Weights, projects_dir: &str) -> Result<()> {
+pub async fn run_select(cache: &Cache, weights: &Weights, projects_dir: &str, force: bool, skip: Vec<String>) -> Result<()> {
+    let skip_steps: HashSet<String> = skip.into_iter().collect();
     let programs = cache.get_all_programs().await?;
 
     // Score and sort — skip programs with no web scopes
@@ -155,6 +160,8 @@ pub async fn run_select(cache: &Cache, weights: &Weights, projects_dir: &str) ->
 
     let base_dir = Path::new(projects_dir);
 
+    // Prepare selected BBPs
+    let mut bbp_tasks = Vec::new();
     for idx in selections {
         let (program, scopes, score) = &entries[idx];
         let web_scopes = filter_web_scopes(scopes);
@@ -166,10 +173,42 @@ pub async fn run_select(cache: &Cache, weights: &Weights, projects_dir: &str) ->
 
         let project_id = make_project_id(&program.attributes.handle);
         let project_dir = init_project_dir(&project_id, base_dir, program, score, &web_scopes)?;
-        println!("Created project: {}", project_dir.display());
+        bbp_tasks.push((program.attributes.handle.clone(), project_dir));
+    }
 
-        // Run recon pipeline
-        crate::recon::run_recon(&project_dir).await?;
+    if bbp_tasks.len() == 1 {
+        // Single BBP — run directly without MultiProgress overhead
+        let (handle, project_dir) = &bbp_tasks[0];
+        println!("Starting recon: {}", handle);
+        crate::recon::run_recon(project_dir, force, &skip_steps).await?;
+    } else {
+        // Multiple BBPs — run in parallel with semaphore
+        let mp = MultiProgress::new();
+        let sem = Arc::new(Semaphore::new(3));
+        let skip_steps = Arc::new(skip_steps);
+
+        let mut handles = Vec::new();
+        for (handle, project_dir) in bbp_tasks {
+            let sem = sem.clone();
+            let skip_steps = skip_steps.clone();
+            let mp_clone = mp.clone();
+
+            let h = tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                let _ = mp_clone; // keep MultiProgress alive
+                println!("Starting recon: {}", handle);
+                match crate::recon::run_recon(&project_dir, force, &skip_steps).await {
+                    Ok(()) => println!("Completed: {}", handle),
+                    Err(e) => eprintln!("Failed {}: {}", handle, e),
+                }
+            });
+            handles.push(h);
+        }
+
+        // Wait for all BBPs
+        for h in handles {
+            let _ = h.await;
+        }
     }
 
     Ok(())

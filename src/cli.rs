@@ -44,6 +44,12 @@ pub enum Commands {
         /// Projects directory (default: ~/.h1scout/projects)
         #[arg(long)]
         projects_dir: Option<String>,
+        /// Force re-run all steps even if checkpoint exists
+        #[arg(long)]
+        force: bool,
+        /// Skip specific steps: bbot,httpx,urls,nuclei,llm (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        skip: Vec<String>,
     },
     /// TUI: review attack points and generate Auto-Solve input
     Review {
