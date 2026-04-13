@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use reqwest::Client;
 
-use super::models::{ProgramData, ProgramList, ScopeData, ScopeList};
+use super::models::{ProgramData, ProgramDetail, ProgramList, ScopeData, ScopeList};
 
 #[derive(Clone)]
 pub struct H1Client {
@@ -69,6 +69,13 @@ impl H1Client {
         Ok(all_scopes)
     }
 
+    /// Fetch program policy text
+    pub async fn fetch_program_policy(&self, handle: &str) -> Result<Option<String>> {
+        let url = format!("{}/v1/hackers/programs/{}", self.base_url, handle);
+        let detail: ProgramDetail = self.get_with_retry(&url).await?;
+        Ok(detail.data.attributes.policy)
+    }
+
     async fn get_with_retry<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
         let max_retries = 5;
 
@@ -105,19 +112,5 @@ impl H1Client {
         }
 
         Err(anyhow!("Max retries exceeded"))
-    }
-
-    /// Download the official scope CSV from HackerOne's public endpoint.
-    pub async fn download_scope_csv(&self, handle: &str) -> Result<String> {
-        let url = format!("https://hackerone.com/teams/{}/assets/download_csv.csv", handle);
-        let resp = self.client.get(&url).send().await?;
-        if !resp.status().is_success() {
-            return Err(anyhow!("Scope CSV download failed for {}: HTTP {}", handle, resp.status()));
-        }
-        let body = resp.text().await?;
-        if body.is_empty() {
-            return Err(anyhow!("Scope CSV is empty for {}", handle));
-        }
-        Ok(body)
     }
 }

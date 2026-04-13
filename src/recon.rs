@@ -1,7 +1,19 @@
 use anyhow::{anyhow, Result};
 use indicatif::{ProgressBar, ProgressStyle};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{HashMap, HashSet};
+
+/// Deserialize a u8 that may be null → default to 0
+fn deserialize_null_u8<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where D: Deserializer<'de> {
+    Ok(Option::<u8>::deserialize(deserializer)?.unwrap_or(0))
+}
+
+/// Deserialize a u16 that may be null → default to 0
+fn deserialize_null_u16<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where D: Deserializer<'de> {
+    Ok(Option::<u16>::deserialize(deserializer)?.unwrap_or(0))
+}
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -55,30 +67,370 @@ pub struct TargetInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttackPoint {
+    #[serde(default)]
     pub ap_id: String,
+    #[serde(default)]
     pub url: String,
+    #[serde(default)]
     pub method: String,
+    #[serde(default)]
     pub category: String,
+    #[serde(default)]
+    pub group_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_null_u8")]
     pub priority: u8,
+    #[serde(default)]
     pub evidence: Evidence,
+    #[serde(default)]
     pub request_sample: Option<RequestSample>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Evidence {
+    #[serde(default)]
     pub source: String,
+    #[serde(default)]
     pub raw: String,
+    #[serde(default)]
     pub llm_reasoning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestSample {
+    #[serde(default)]
     pub url: String,
+    #[serde(default)]
     pub method: String,
+    #[serde(default)]
     pub headers: HashMap<String, String>,
+    #[serde(default)]
     pub params: HashMap<String, String>,
+    #[serde(default, deserialize_with = "deserialize_null_u16")]
     pub response_status: u16,
+    #[serde(default)]
     pub response_snippet: Option<String>,
+}
+
+// ── httpx JSON result parsing ──
+
+/// Parsed httpx JSON output for a single host
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpxResult {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub input: Option<String>,
+    #[serde(default, alias = "status-code", alias = "status_code")]
+    pub status_code: Option<u16>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub webserver: Option<String>,
+    #[serde(default, alias = "content-type", alias = "content_type")]
+    pub content_type: Option<String>,
+    #[serde(default, alias = "tech")]
+    pub technologies: Option<Vec<String>>,
+    #[serde(default, alias = "header")]
+    pub response_headers: Option<HashMap<String, serde_json::Value>>,
+    #[serde(default, alias = "body")]
+    pub response_body: Option<String>,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub port: Option<String>,
+    #[serde(default)]
+    pub scheme: Option<String>,
+    #[serde(default, alias = "content-length", alias = "content_length")]
+    pub content_length: Option<u64>,
+    #[serde(default)]
+    pub method: Option<String>,
+}
+
+/// Parse httpx JSON lines into structured results, keyed by hostname
+fn parse_httpx_json(lines: &[String]) -> HashMap<String, HttpxResult> {
+    let mut map = HashMap::new();
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(result) = serde_json::from_str::<HttpxResult>(trimmed) {
+            let host = if let Some(ref url) = result.url {
+                extract_hostname(url)
+            } else if let Some(ref input) = result.input {
+                extract_hostname(input)
+            } else if let Some(ref h) = result.host {
+                h.clone()
+            } else {
+                continue;
+            };
+            if !host.is_empty() {
+                map.insert(host, result);
+            }
+        }
+    }
+    map
+}
+
+/// Fallback: parse plain text httpx output (for backwards compatibility)
+fn parse_httpx_text(lines: &[String]) -> HashMap<String, u16> {
+    let mut map = HashMap::new();
+    for line in lines {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let host = extract_hostname(parts[0]);
+        for part in &parts[1..] {
+            let trimmed = part.trim_start_matches('[').trim_end_matches(']');
+            if let Ok(code) = trimmed.parse::<u16>() {
+                if (100..600).contains(&code) {
+                    map.insert(host.clone(), code);
+                    break;
+                }
+            }
+        }
+    }
+    map
+}
+
+// ── JS Endpoints Sanitization ──
+
+/// Static file extensions to remove — zero AP value
+const STATIC_EXTENSIONS: &[&str] = &[
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".avif",
+    ".css", ".woff", ".woff2", ".ttf", ".eot", ".otf",
+    ".mp3", ".mp4", ".webm", ".ogg", ".wav",
+    ".pdf", ".zip", ".gz", ".tar", ".br",
+    ".map", ".ts", ".tsx", ".jsx", ".vue", ".scss", ".less",
+];
+
+/// Known external domains that are never in scope
+const NOISE_DOMAINS: &[&str] = &[
+    "googleapis.com", "gstatic.com", "google.com", "googletagmanager.com",
+    "google-analytics.com", "googleadservices.com",
+    "facebook.com", "facebook.net", "fbcdn.net",
+    "twitter.com", "twimg.com",
+    "cdn.shopify.com", "shopify.com",
+    "jquery.com", "jsdelivr.net", "cdnjs.cloudflare.com", "unpkg.com",
+    "cloudflare.com", "cloudfront.net",
+    "wp.com", "wordpress.com",
+    "pinterest.com", "linkedin.com", "instagram.com",
+    "youtube.com", "ytimg.com",
+    "maxcdn.bootstrapcdn.com", "bootstrapcdn.com",
+    "gravatar.com", "wp.com",
+    "sentry.io", "segment.com", "mixpanel.com", "hotjar.com",
+    "intercom.io", "zendesk.com", "crisp.chat",
+    "stripe.com", "paypal.com",
+    "recaptcha.net", "hcaptcha.com",
+];
+
+/// High-value path patterns that should always be kept
+const API_PATTERNS: &[&str] = &[
+    "/api/", "/api.", "/v1/", "/v2/", "/v3/",
+    "/graphql", "/gql",
+    "/admin", "/internal", "/private", "/debug", "/management",
+    "/auth", "/login", "/logout", "/oauth", "/sso", "/saml",
+    "/token", "/session", "/callback",
+    "/webhook", "/websocket", "/ws/",
+    "/upload", "/download", "/export", "/import",
+    "/config", "/settings", "/profile", "/account",
+    "/users", "/user/", "/me/",
+    "/.well-known/",
+    "/swagger", "/api-docs", "/openapi",
+    "/actuator", "/metrics", "/health", "/status",
+    "/search", "/query", "/filter",
+];
+
+/// Sanitize JS endpoints: remove noise, keep AP-relevant paths
+pub fn sanitize_js_endpoints(endpoints: &[String], scope_identifiers: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+
+    for ep in endpoints {
+        let trimmed = ep.trim();
+        if trimmed.is_empty() || trimmed.len() < 3 {
+            continue;
+        }
+
+        let lower = trimmed.to_lowercase();
+
+        // Skip bare JS filenames (start with - or are just hashes)
+        if trimmed.starts_with('-') {
+            continue;
+        }
+
+        // Skip node_modules paths
+        if lower.contains("node_modules") {
+            continue;
+        }
+
+        // Skip relative source paths (./src/, ./lib/, ./dist/)
+        if trimmed.starts_with("./") {
+            continue;
+        }
+
+        // Skip base64 blobs and encoded data (high ratio of +/= chars)
+        let special_chars = trimmed.chars().filter(|c| matches!(c, '+' | '=' | '/' )).count();
+        if trimmed.len() > 50 && special_chars as f64 / trimmed.len() as f64 > 0.15 {
+            continue;
+        }
+
+        // Skip long strings without clear URL structure
+        if trimmed.len() > 200 {
+            continue;
+        }
+
+        // Skip static file extensions
+        let is_static = STATIC_EXTENSIONS.iter().any(|ext| {
+            lower.ends_with(ext) || lower.contains(&format!("{}?", ext))
+        });
+        if is_static {
+            continue;
+        }
+
+        // Skip known external noise domains
+        let is_noise = NOISE_DOMAINS.iter().any(|d| lower.contains(d));
+        if is_noise {
+            continue;
+        }
+
+        // If it's a full URL, check scope
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") || trimmed.starts_with("//") {
+            let normalized = if trimmed.starts_with("//") {
+                format!("https:{}", trimmed)
+            } else {
+                trimmed.to_string()
+            };
+            if !is_in_scope(&normalized, scope_identifiers) {
+                continue;
+            }
+        }
+
+        // Keep: API patterns always pass
+        let is_api = API_PATTERNS.iter().any(|p| lower.contains(p));
+        if is_api {
+            result.push(trimmed.to_string());
+            continue;
+        }
+
+        // Keep: has query parameters (potential injection/IDOR targets)
+        if trimmed.contains('?') && trimmed.contains('=') {
+            result.push(trimmed.to_string());
+            continue;
+        }
+
+        // Keep: looks like an API path (starts with / and has structure)
+        if trimmed.starts_with('/') {
+            let segments: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+            // At least 2 path segments and not just a bare filename
+            if segments.len() >= 2 {
+                result.push(trimmed.to_string());
+                continue;
+            }
+        }
+
+        // Keep: in-scope full URLs that passed all filters
+        if trimmed.starts_with("http") {
+            result.push(trimmed.to_string());
+        }
+    }
+
+    result.sort();
+    result.dedup();
+    result
+}
+
+/// Enrich AP request_sample with httpx packet data
+fn enrich_request_samples(
+    attack_points: &mut [AttackPoint],
+    httpx_json: &HashMap<String, HttpxResult>,
+    httpx_text: &HashMap<String, u16>,
+) {
+    for ap in attack_points.iter_mut() {
+        let host = extract_hostname(&ap.url);
+
+        // Parse query params from AP URL
+        let mut params = HashMap::new();
+        if let Some(query) = ap.url.split('?').nth(1) {
+            for pair in query.split('&') {
+                let mut kv = pair.splitn(2, '=');
+                if let (Some(k), Some(v)) = (kv.next(), kv.next()) {
+                    params.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
+
+        if let Some(hx) = httpx_json.get(&host) {
+            // Rich data from JSON mode
+            let status = hx.status_code.unwrap_or(0);
+
+            let mut resp_headers = HashMap::new();
+            if let Some(ref ct) = hx.content_type {
+                resp_headers.insert("Content-Type".to_string(), ct.clone());
+            }
+            if let Some(ref ws) = hx.webserver {
+                resp_headers.insert("Server".to_string(), ws.clone());
+            }
+            if let Some(ref cl) = hx.content_length {
+                resp_headers.insert("Content-Length".to_string(), cl.to_string());
+            }
+
+            // Truncate body to first 500 chars for snippet
+            let snippet = hx.response_body.as_ref().map(|b| {
+                if b.len() > 500 {
+                    format!("{}...", &b[..500])
+                } else {
+                    b.clone()
+                }
+            });
+
+            match &mut ap.request_sample {
+                Some(sample) => {
+                    if sample.response_status == 0 {
+                        sample.response_status = status;
+                    }
+                    if sample.response_snippet.is_none() {
+                        sample.response_snippet = snippet;
+                    }
+                }
+                None => {
+                    let mut req_headers = HashMap::new();
+                    req_headers.insert("Accept".to_string(), "application/json".to_string());
+                    req_headers.insert("Host".to_string(), host.clone());
+
+                    ap.request_sample = Some(RequestSample {
+                        url: ap.url.clone(),
+                        method: ap.method.clone(),
+                        headers: req_headers,
+                        params,
+                        response_status: status,
+                        response_snippet: snippet,
+                    });
+                }
+            }
+        } else {
+            // Fallback to text-mode status code
+            let status = httpx_text.get(&host).copied().unwrap_or(0);
+
+            if ap.request_sample.is_none() {
+                let mut headers = HashMap::new();
+                headers.insert("Accept".to_string(), "application/json".to_string());
+
+                ap.request_sample = Some(RequestSample {
+                    url: ap.url.clone(),
+                    method: ap.method.clone(),
+                    headers,
+                    params,
+                    response_status: status,
+                    response_snippet: None,
+                });
+            } else if let Some(sample) = &mut ap.request_sample {
+                if sample.response_status == 0 {
+                    sample.response_status = status;
+                }
+            }
+        }
+    }
 }
 
 // ── BBOT Flags ──
@@ -98,21 +450,71 @@ pub fn get_bbot_flags(scopes: &[WebScope]) -> Vec<String> {
     }
 }
 
-// ── Recon Options ──
+// ── Scope Filtering ──
 
-#[derive(Debug, Clone)]
-pub struct ReconOptions {
-    pub skip_nuclei: bool,
-    pub skill: String,
-}
+/// Check if a URL/hostname is in scope based on scope identifiers from rule.csv.
+/// Supports wildcard matching: "*.example.com" matches "sub.example.com" and "example.com".
+/// Exact match: "app.example.com" matches only "app.example.com".
+pub fn is_in_scope(url_or_host: &str, scope_identifiers: &[String]) -> bool {
+    // Extract hostname from URL
+    let host = extract_hostname(url_or_host);
+    if host.is_empty() {
+        return false;
+    }
+    let host_lower = host.to_lowercase();
 
-impl Default for ReconOptions {
-    fn default() -> Self {
-        Self {
-            skip_nuclei: std::env::var("SKIP_NUCLEI").is_ok(),
-            skill: std::env::var("AP_SKILL").unwrap_or_else(|_| "boundary".to_string()),
+    for scope in scope_identifiers {
+        let scope_lower = scope.to_lowercase();
+
+        if scope_lower.starts_with("*.") {
+            // Wildcard: *.example.com matches example.com and *.example.com
+            let base = &scope_lower[2..]; // "example.com"
+            if host_lower == base || host_lower.ends_with(&format!(".{}", base)) {
+                return true;
+            }
+        } else {
+            // Exact match
+            if host_lower == scope_lower {
+                return true;
+            }
         }
     }
+
+    false
+}
+
+/// Extract hostname from a URL string or plain hostname.
+fn extract_hostname(input: &str) -> String {
+    let without_scheme = input
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+
+    // Take everything before the first / or : (port)
+    without_scheme
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Filter a list of URLs, keeping only those matching scope identifiers.
+/// Returns (in_scope, out_of_scope).
+pub fn filter_urls_by_scope(urls: &[String], scope_identifiers: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut in_scope = Vec::new();
+    let mut out_of_scope = Vec::new();
+
+    for url in urls {
+        if is_in_scope(url, scope_identifiers) {
+            in_scope.push(url.clone());
+        } else {
+            out_of_scope.push(url.clone());
+        }
+    }
+
+    (in_scope, out_of_scope)
 }
 
 // ── Recon Runner ──
@@ -121,21 +523,44 @@ impl Default for ReconOptions {
 pub struct ReconRunner {
     pub project_dir: PathBuf,
     pub recon_dir: PathBuf,
-    pub opts: ReconOptions,
+    pub force: bool,
+    pub skip_steps: HashSet<String>,
 }
 
 impl ReconRunner {
-    pub fn new(project_dir: &Path) -> Self {
-        Self::with_opts(project_dir, ReconOptions::default())
-    }
-
-    pub fn with_opts(project_dir: &Path, opts: ReconOptions) -> Self {
+    pub fn new(project_dir: &Path, force: bool, skip_steps: HashSet<String>) -> Self {
         let recon_dir = project_dir.join("recon");
         Self {
             project_dir: project_dir.to_path_buf(),
             recon_dir,
-            opts,
+            force,
+            skip_steps,
         }
+    }
+
+    /// Check if a step's output file exists and is non-empty
+    pub fn step_done(&self, filename: &str) -> bool {
+        if self.force {
+            return false;
+        }
+        let path = self.recon_dir.join(filename);
+        path.exists() && path.metadata().map(|m| m.len() > 0).unwrap_or(false)
+    }
+
+    /// Check if a step's marker file exists (for steps with possibly empty output)
+    fn marker_done(&self, marker: &str) -> bool {
+        if self.force {
+            return false;
+        }
+        self.recon_dir.join(marker).exists()
+    }
+
+    /// Sanitize domain name for use as checkpoint filename
+    fn sanitize_domain(domain: &str) -> String {
+        domain
+            .trim_start_matches("*.")
+            .replace('.', "_")
+            .replace('*', "wildcard")
     }
 
     fn progress_bar(&self, step: u8, total: u8, msg: &str) -> ProgressBar {
@@ -331,20 +756,45 @@ impl ReconRunner {
         let input_path = self.recon_dir.join("subdomains_input.txt");
         std::fs::write(&input_path, &input)?;
 
+        // Run httpx in JSON mode for rich packet data
+        let json_output_path = self.recon_dir.join("httpx_results.jsonl");
         let _ = self.run_cmd(
             "httpx",
             &[
                 "-l", &input_path.to_string_lossy(),
                 "-silent",
+                "-json",
                 "-title", "-status-code", "-tech-detect",
                 "-web-server", "-ip", "-cname",
-                "-o", &self.recon_dir.join("live_hosts.txt").to_string_lossy(),
+                "-content-type", "-content-length",
+                "-body-preview", "500",
+                "-o", &json_output_path.to_string_lossy(),
             ],
         ).await;
 
-        let live = self.read_file_lines("live_hosts.txt");
-        pb.finish_with_message(format!("Found {} live hosts", live.len()));
-        Ok(live)
+        // Generate plain live_hosts.txt from JSON results for other steps
+        let json_lines = self.read_file_lines("httpx_results.jsonl");
+        let mut live_hosts = Vec::new();
+        for line in &json_lines {
+            if let Ok(hx) = serde_json::from_str::<HttpxResult>(line) {
+                if let Some(ref url) = hx.url {
+                    let status = hx.status_code.unwrap_or(0);
+                    let title = hx.title.as_deref().unwrap_or("");
+                    let tech = hx.technologies.as_ref()
+                        .map(|t| t.join(","))
+                        .unwrap_or_default();
+                    let ws = hx.webserver.as_deref().unwrap_or("");
+                    live_hosts.push(format!("{} [{}] [{}] [{}] [{}]", url, status, title, tech, ws));
+                }
+            }
+        }
+        std::fs::write(
+            self.recon_dir.join("live_hosts.txt"),
+            live_hosts.join("\n"),
+        )?;
+
+        pb.finish_with_message(format!("Found {} live hosts", live_hosts.len()));
+        Ok(live_hosts)
     }
 
     /// Step 3: URL collection (parallel gau + waybackurls per domain, parallel linkfinder)
@@ -504,14 +954,7 @@ impl ReconRunner {
     }
 
     /// Step 4: Nuclei scan
-    pub fn run_nuclei(&self) -> Result<Vec<String>> {
-        // Skip if option is set
-        if self.opts.skip_nuclei {
-            println!("[4/5] Skipped nuclei");
-            std::fs::write(self.recon_dir.join("nuclei.txt"), "").ok();
-            return Ok(vec![]);
-        }
-
+    pub async fn run_nuclei(&self) -> Result<Vec<String>> {
         let live_hosts_path = self.recon_dir.join("live_hosts.txt");
         if !live_hosts_path.exists() {
             println!("[4/5] Skipped nuclei — no live hosts");
@@ -559,19 +1002,62 @@ impl ReconRunner {
         let js_endpoints = self.read_file_lines("js_endpoints.txt");
         let nuclei = self.read_file_lines("nuclei.txt");
 
-        // Read the AP identifier skill (boundary is default, vuln is legacy)
-        let skill_content = match self.opts.skill.as_str() {
-            "vuln" => include_str!("../SKILL/ap-identifier-SKILL.md"),
-            _ => include_str!("../SKILL/ap-identifier-boundary-SKILL.md"),
+        // Read the AP identifier skill
+        let skill_content = include_str!("../SKILL/ap-identifier-SKILL.md");
+
+        // Read scope info for LLM context
+        let rule_csv = std::fs::read_to_string(self.project_dir.join("rule.csv")).unwrap_or_default();
+        let scope_lines: Vec<&str> = rule_csv.lines().skip(1).collect();
+        let scope_info = scope_lines.join("\n");
+
+        // Read program policy if available
+        let policy_path = self.project_dir.join("policy.md");
+        let policy_section = if policy_path.exists() {
+            let policy = std::fs::read_to_string(&policy_path).unwrap_or_default();
+            if policy.trim().is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n\n## Program Policy & Guidelines\n\nThis is the official program policy from HackerOne. Follow these rules strictly — they define what is allowed and what is excluded.\n\n```\n{}\n```\n",
+                    policy.trim()
+                )
+            }
+        } else {
+            String::new()
         };
 
+        // Build scope identifiers for JS endpoint sanitization
+        let rule_csv_raw = std::fs::read_to_string(self.project_dir.join("rule.csv")).unwrap_or_default();
+        let scope_ids: Vec<String> = rule_csv_raw.lines().skip(1)
+            .filter_map(|l| l.split(',').next().map(|s| s.to_string()))
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        // Sanitize JS endpoints: remove noise, keep AP-relevant paths
+        let js_clean = sanitize_js_endpoints(&js_endpoints, &scope_ids);
+
+        // Save sanitized version for debugging
+        let _ = std::fs::write(
+            self.recon_dir.join("js_endpoints_clean.txt"),
+            js_clean.join("\n"),
+        );
+
+        let js_sample: Vec<_> = js_clean.iter().take(500).cloned().collect();
+        let nuclei_sample: Vec<_> = nuclei.iter().take(200).cloned().collect();
+
         let prompt = format!(
-            "{}\n\n---\n\n## Recon Data\n\n### Live Hosts\n{}\n\n### URLs (sample, first 200)\n{}\n\n### JS Endpoints\n{}\n\n### Nuclei Results\n{}\n\n---\n\nAnalyze the above recon data. Return ONLY a JSON array of attack points. No other text.",
+            "{}\n\n---\n\n## CRITICAL: Scope Boundaries\n\nThe following are the ONLY in-scope targets. Do NOT generate attack points for any domain outside this scope.\n\n```\n{}\n```\n\nAny AP with a URL not matching these scope identifiers will be automatically rejected.{}\n\n---\n\n## Recon Data\n\n### Live Hosts ({} total)\n{}\n\n### URLs (first 200 of {} total)\n{}\n\n### JS Endpoints ({} sanitized from {} raw)\n{}\n\n### Nuclei Results (first 200 of {} total)\n{}\n\n---\n\nAnalyze the above recon data. Return ONLY a JSON array of attack points. Only include in-scope targets. Follow the program policy strictly. No other text.",
             skill_content,
+            scope_info,
+            policy_section,
+            live_hosts.len(),
             live_hosts.join("\n"),
+            urls.len(),
             urls.iter().take(200).cloned().collect::<Vec<_>>().join("\n"),
-            js_endpoints.join("\n"),
-            nuclei.join("\n"),
+            js_clean.len(), js_endpoints.len(),
+            js_sample.join("\n"),
+            nuclei.len(),
+            nuclei_sample.join("\n"),
         );
 
         let response = crate::llm::query(&prompt, &self.project_dir).await;
@@ -666,8 +1152,8 @@ impl ReconRunner {
 }
 
 /// Main entry point for recon pipeline
-pub async fn run_recon(project_dir: &Path, opts: ReconOptions) -> Result<()> {
-    let runner = ReconRunner::with_opts(project_dir, opts);
+pub async fn run_recon(project_dir: &Path, force: bool, skip_steps: &HashSet<String>) -> Result<()> {
+    let runner = ReconRunner::new(project_dir, force, skip_steps.clone());
 
     // Read rule.csv to get targets
     let rule_csv = std::fs::read_to_string(project_dir.join("rule.csv"))
@@ -704,6 +1190,9 @@ pub async fn run_recon(project_dir: &Path, opts: ReconOptions) -> Result<()> {
 
     let bbot_flags = get_bbot_flags(&web_scopes);
 
+    // Build scope identifier list for filtering
+    let scope_identifiers: Vec<String> = targets.clone();
+
     println!("\n=== Auto-Recon: {} ===\n", project_dir.file_name().unwrap_or_default().to_string_lossy());
 
     // 1. Subdomain enumeration
@@ -717,6 +1206,21 @@ pub async fn run_recon(project_dir: &Path, opts: ReconOptions) -> Result<()> {
         runner.run_bbot(&targets, &bbot_flags).await?
     };
 
+    // Scope filter: subdomains
+    let (subdomains, oos_subs) = filter_urls_by_scope(&subdomains, &scope_identifiers);
+    if !oos_subs.is_empty() {
+        println!("  Filtered {} out-of-scope subdomains", oos_subs.len());
+        let _ = std::fs::write(
+            runner.recon_dir.join("subdomains_out_of_scope.txt"),
+            oos_subs.join("\n"),
+        );
+        // Rewrite subdomains.txt with only in-scope
+        let _ = std::fs::write(
+            runner.recon_dir.join("subdomains.txt"),
+            subdomains.join("\n"),
+        );
+    }
+
     // 2. Live host detection
     let _live_hosts = if runner.skip_steps.contains("httpx") {
         println!("[2/5] Skipped httpx (--skip httpx)");
@@ -729,7 +1233,7 @@ pub async fn run_recon(project_dir: &Path, opts: ReconOptions) -> Result<()> {
     };
 
     // 3. URL collection + JS analysis
-    let _urls = if runner.skip_steps.contains("urls") {
+    let urls = if runner.skip_steps.contains("urls") {
         println!("[3/5] Skipped URL collection (--skip urls)");
         runner.read_file_lines("urls.txt")
     } else if runner.step_done("urls.txt") {
@@ -738,6 +1242,29 @@ pub async fn run_recon(project_dir: &Path, opts: ReconOptions) -> Result<()> {
     } else {
         runner.run_url_collection(&targets).await?
     };
+
+    // Scope filter: URLs
+    let (urls, oos_urls) = filter_urls_by_scope(&urls, &scope_identifiers);
+    if !oos_urls.is_empty() {
+        println!("  Filtered {} out-of-scope URLs", oos_urls.len());
+        let _ = std::fs::write(
+            runner.recon_dir.join("urls_out_of_scope.txt"),
+            oos_urls.join("\n"),
+        );
+        // Rewrite urls.txt with only in-scope
+        let _ = std::fs::write(
+            runner.recon_dir.join("urls.txt"),
+            urls.join("\n"),
+        );
+        // Also refilter JS files
+        let js_files: Vec<&String> = urls.iter().filter(|u| {
+            u.to_lowercase().ends_with(".js") || u.to_lowercase().contains(".js?")
+        }).collect();
+        let _ = std::fs::write(
+            runner.recon_dir.join("js_files.txt"),
+            js_files.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n"),
+        );
+    }
 
     // 4. Nuclei scan
     let _nuclei = if runner.skip_steps.contains("nuclei") {
@@ -765,32 +1292,29 @@ pub async fn run_recon(project_dir: &Path, opts: ReconOptions) -> Result<()> {
         runner.run_ap_identification().await?
     };
 
+    // Scope filter: AP URLs — remove any APs with out-of-scope URLs
+    let mut attack_points: Vec<AttackPoint> = attack_points
+        .into_iter()
+        .filter(|ap| {
+            if is_in_scope(&ap.url, &scope_identifiers) {
+                true
+            } else {
+                eprintln!("  Removed out-of-scope AP: {} ({})", ap.ap_id, ap.url);
+                false
+            }
+        })
+        .collect();
+
+    // Enrich request_sample with httpx packet data
+    let httpx_json_lines = runner.read_file_lines("httpx_results.jsonl");
+    let httpx_json = parse_httpx_json(&httpx_json_lines);
+    let live_hosts_lines = runner.read_file_lines("live_hosts.txt");
+    let httpx_text = parse_httpx_text(&live_hosts_lines);
+    enrich_request_samples(&mut attack_points, &httpx_json, &httpx_text);
+
     // 6. Generate RR.json
     let rr_path = runner.generate_rr(attack_points)?;
     println!("\nRR.json generated: {}", rr_path.display());
-
-    Ok(())
-}
-
-/// Re-run only the LLM AP identification step on existing recon data.
-/// Useful for retrying with a different SKILL or after LLM failure.
-pub async fn run_recon_ap_only(project_dir: &Path, opts: ReconOptions) -> Result<()> {
-    if !project_dir.exists() {
-        return Err(anyhow!("Project directory not found: {}", project_dir.display()));
-    }
-    let recon_dir = project_dir.join("recon");
-    if !recon_dir.exists() {
-        return Err(anyhow!("recon/ directory not found — run full recon first"));
-    }
-
-    let runner = ReconRunner::with_opts(project_dir, opts);
-
-    println!("\n=== AP re-identification: {} ===\n", project_dir.file_name().unwrap_or_default().to_string_lossy());
-    println!("Using SKILL: {}", runner.opts.skill);
-
-    let attack_points = runner.run_ap_identification()?;
-    let rr_path = runner.generate_rr(attack_points)?;
-    println!("\nRR.json regenerated: {}", rr_path.display());
 
     Ok(())
 }
@@ -855,6 +1379,7 @@ mod tests {
                 url: "https://api.test.com/v1/users/123".to_string(),
                 method: "GET".to_string(),
                 category: "idor_candidate".to_string(),
+                group_id: None,
                 priority: 1,
                 evidence: Evidence {
                     source: "gau".to_string(),
@@ -902,6 +1427,7 @@ mod tests {
             url: "https://api.test.com/swagger".to_string(),
             method: "GET".to_string(),
             category: "exposure".to_string(),
+            group_id: None,
             priority: 2,
             evidence: Evidence {
                 source: "nuclei".to_string(),
@@ -976,5 +1502,216 @@ mod tests {
 
         std::fs::write(recon_dir.join(".nuclei_done"), "").unwrap();
         assert!(runner.marker_done(".nuclei_done"));
+    }
+
+    // ── Scope filter tests ──
+
+    #[test]
+    fn test_is_in_scope_wildcard() {
+        let scopes = vec!["*.grammarly.io".to_string()];
+        assert!(is_in_scope("https://app.grammarly.io/api/v1", &scopes));
+        assert!(is_in_scope("https://grammarly.io/login", &scopes));
+        assert!(is_in_scope("sub.deep.grammarly.io", &scopes));
+        assert!(!is_in_scope("https://coda.io/api", &scopes));
+        assert!(!is_in_scope("https://evil-grammarly.io/x", &scopes));
+    }
+
+    #[test]
+    fn test_is_in_scope_exact() {
+        let scopes = vec!["app.example.com".to_string()];
+        assert!(is_in_scope("https://app.example.com/path", &scopes));
+        assert!(!is_in_scope("https://other.example.com/path", &scopes));
+        assert!(!is_in_scope("https://example.com/path", &scopes));
+    }
+
+    #[test]
+    fn test_is_in_scope_multiple() {
+        let scopes = vec![
+            "*.anduril.com".to_string(),
+            "app.special.io".to_string(),
+        ];
+        assert!(is_in_scope("https://api.anduril.com/v1", &scopes));
+        assert!(is_in_scope("https://app.special.io/login", &scopes));
+        assert!(!is_in_scope("https://andurildev.com/x", &scopes));
+        assert!(!is_in_scope("https://api.sanity.io/x", &scopes));
+        assert!(!is_in_scope("https://identitytoolkit.googleapis.com", &scopes));
+    }
+
+    #[test]
+    fn test_filter_urls_by_scope() {
+        let urls = vec![
+            "https://app.grammarly.io/api".to_string(),
+            "https://coda.io/api".to_string(),
+            "https://sub.grammarly.io/login".to_string(),
+            "https://evil.com/hack".to_string(),
+        ];
+        let scopes = vec!["*.grammarly.io".to_string()];
+
+        let (in_scope, out_of_scope) = filter_urls_by_scope(&urls, &scopes);
+        assert_eq!(in_scope.len(), 2);
+        assert_eq!(out_of_scope.len(), 2);
+        assert!(in_scope.iter().all(|u| u.contains("grammarly.io")));
+        assert!(out_of_scope.iter().all(|u| !u.contains("grammarly.io")));
+    }
+
+    #[test]
+    fn test_extract_hostname() {
+        assert_eq!(extract_hostname("https://app.example.com/path?q=1"), "app.example.com");
+        assert_eq!(extract_hostname("http://api.test.io:8080/v1"), "api.test.io");
+        assert_eq!(extract_hostname("sub.domain.com"), "sub.domain.com");
+        assert_eq!(extract_hostname(""), "");
+    }
+
+    #[test]
+    fn test_parse_httpx_text() {
+        let lines = vec![
+            "https://api.example.com [200] [API Server] [nginx]".to_string(),
+            "https://admin.example.com [403] [Forbidden] [apache]".to_string(),
+            "https://broken.example.com".to_string(),
+        ];
+        let map = parse_httpx_text(&lines);
+        assert_eq!(map.get("api.example.com"), Some(&200));
+        assert_eq!(map.get("admin.example.com"), Some(&403));
+        assert_eq!(map.get("broken.example.com"), None);
+    }
+
+    #[test]
+    fn test_parse_httpx_json() {
+        let lines = vec![
+            r#"{"url":"https://api.example.com","status_code":200,"title":"API","webserver":"nginx","content_type":"application/json"}"#.to_string(),
+            r#"{"url":"https://admin.example.com","status_code":403,"title":"Forbidden"}"#.to_string(),
+        ];
+        let map = parse_httpx_json(&lines);
+        assert_eq!(map.len(), 2);
+        let api = map.get("api.example.com").unwrap();
+        assert_eq!(api.status_code, Some(200));
+        assert_eq!(api.webserver.as_deref(), Some("nginx"));
+        let admin = map.get("admin.example.com").unwrap();
+        assert_eq!(admin.status_code, Some(403));
+    }
+
+    #[test]
+    fn test_enrich_with_json_data() {
+        let mut aps = vec![AttackPoint {
+            ap_id: "ap_001".to_string(),
+            url: "https://api.example.com/v1/users?id=123".to_string(),
+            method: "GET".to_string(),
+            category: "IDOR".to_string(),
+            group_id: None,
+            priority: 1,
+            evidence: Evidence {
+                source: "gau".to_string(),
+                raw: "/v1/users?id=123".to_string(),
+                llm_reasoning: None,
+            },
+            request_sample: None,
+        }];
+
+        let mut httpx_json = HashMap::new();
+        httpx_json.insert("api.example.com".to_string(), HttpxResult {
+            url: Some("https://api.example.com".to_string()),
+            input: None,
+            status_code: Some(200),
+            title: Some("API".to_string()),
+            webserver: Some("nginx".to_string()),
+            content_type: Some("application/json".to_string()),
+            technologies: None,
+            response_headers: None,
+            response_body: Some("{ \"users\": [] }".to_string()),
+            host: None,
+            port: None,
+            scheme: None,
+            content_length: Some(15),
+            method: None,
+        });
+
+        enrich_request_samples(&mut aps, &httpx_json, &HashMap::new());
+
+        let sample = aps[0].request_sample.as_ref().unwrap();
+        assert_eq!(sample.response_status, 200);
+        assert_eq!(sample.method, "GET");
+        assert_eq!(sample.params.get("id"), Some(&"123".to_string()));
+        assert!(sample.response_snippet.is_some());
+        assert!(sample.response_snippet.as_ref().unwrap().contains("users"));
+    }
+
+    #[test]
+    fn test_enrich_fallback_to_text() {
+        let mut aps = vec![AttackPoint {
+            ap_id: "ap_001".to_string(),
+            url: "https://other.example.com/api".to_string(),
+            method: "GET".to_string(),
+            category: "exposure".to_string(),
+            group_id: None,
+            priority: 3,
+            evidence: Evidence {
+                source: "gau".to_string(),
+                raw: "/api".to_string(),
+                llm_reasoning: None,
+            },
+            request_sample: None,
+        }];
+
+        let mut httpx_text = HashMap::new();
+        httpx_text.insert("other.example.com".to_string(), 403u16);
+
+        enrich_request_samples(&mut aps, &HashMap::new(), &httpx_text);
+
+        let sample = aps[0].request_sample.as_ref().unwrap();
+        assert_eq!(sample.response_status, 403);
+        assert!(sample.response_snippet.is_none());
+    }
+
+    #[test]
+    fn test_enrich_preserves_existing_sample() {
+        let mut headers = HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer xyz".to_string());
+
+        let mut aps = vec![AttackPoint {
+            ap_id: "ap_001".to_string(),
+            url: "https://api.example.com/v1".to_string(),
+            method: "POST".to_string(),
+            category: "injection_candidate".to_string(),
+            group_id: Some("api_v1".to_string()),
+            priority: 3,
+            evidence: Evidence {
+                source: "llm".to_string(),
+                raw: "/v1".to_string(),
+                llm_reasoning: None,
+            },
+            request_sample: Some(RequestSample {
+                url: "https://api.example.com/v1".to_string(),
+                method: "POST".to_string(),
+                headers: headers.clone(),
+                params: HashMap::new(),
+                response_status: 0,
+                response_snippet: None,
+            }),
+        }];
+
+        let mut httpx_json = HashMap::new();
+        httpx_json.insert("api.example.com".to_string(), HttpxResult {
+            url: Some("https://api.example.com".to_string()),
+            input: None,
+            status_code: Some(201),
+            title: None,
+            webserver: None,
+            content_type: None,
+            technologies: None,
+            response_headers: None,
+            response_body: Some("created".to_string()),
+            host: None,
+            port: None,
+            scheme: None,
+            content_length: None,
+            method: None,
+        });
+
+        enrich_request_samples(&mut aps, &httpx_json, &HashMap::new());
+
+        let sample = aps[0].request_sample.as_ref().unwrap();
+        assert_eq!(sample.response_status, 201);
+        assert_eq!(sample.headers.get("Authorization"), Some(&"Bearer xyz".to_string()));
+        assert_eq!(sample.response_snippet.as_deref(), Some("created"));
     }
 }

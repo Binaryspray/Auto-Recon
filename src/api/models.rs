@@ -65,6 +65,36 @@ pub struct ScopeAttributes {
     pub instruction: Option<String>,
 }
 
+// ── Program Detail (single program response) ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProgramDetail {
+    pub data: ProgramDetailData,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProgramDetailData {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub data_type: String,
+    pub attributes: ProgramDetailAttributes,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProgramDetailAttributes {
+    pub handle: String,
+    pub name: String,
+    #[serde(default)]
+    pub policy: Option<String>,
+    #[serde(default = "default_false", deserialize_with = "deserialize_null_bool")]
+    pub offers_bounties: bool,
+    pub submission_state: String,
+    #[serde(default = "default_false", deserialize_with = "deserialize_null_bool")]
+    pub fast_payments: bool,
+    #[serde(default = "default_false", deserialize_with = "deserialize_null_bool")]
+    pub open_scope: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Links {
     pub next: Option<String>,

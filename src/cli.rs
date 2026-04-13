@@ -44,42 +44,35 @@ pub enum Commands {
         /// Projects directory (default: ~/.h1scout/projects)
         #[arg(long)]
         projects_dir: Option<String>,
-        /// Skip nuclei scan (recommended when behind WAF)
+        /// Force re-run all steps even if checkpoint exists
         #[arg(long)]
-        skip_nuclei: bool,
-        /// AP identification skill: "boundary" (default) or "vuln" (legacy)
-        #[arg(long, default_value = "boundary")]
-        skill: String,
-        /// Don't auto-launch review TUI after recon completes
-        #[arg(long)]
-        no_review: bool,
+        force: bool,
+        /// Skip specific steps: bbot,httpx,urls,nuclei,llm (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        skip: Vec<String>,
     },
-    /// Re-run recon on an existing project
-    Recon {
-        /// Project ID (e.g. varonis_20260409)
+    /// Re-run recon pipeline on an existing project (no TUI)
+    Rerun {
+        /// Project ID (e.g. eero_20260413). If omitted, lists available projects.
+        project_id: Option<String>,
+        /// Projects directory (default: ~/.h1scout/projects)
         #[arg(long)]
-        project_id: String,
-        /// Only re-run LLM AP identification (skip BBOT/httpx/gau/nuclei)
+        projects_dir: Option<String>,
+        /// Force re-run all steps even if checkpoint exists
         #[arg(long)]
-        only_ap: bool,
-        /// Skip nuclei scan
-        #[arg(long)]
-        skip_nuclei: bool,
-        /// AP identification skill: "boundary" (default) or "vuln" (legacy)
-        #[arg(long, default_value = "boundary")]
-        skill: String,
-    },
-    /// List completed projects
-    Projects {
-        /// Show only the most recent project
-        #[arg(long)]
-        latest: bool,
+        force: bool,
+        /// Skip specific steps: bbot,httpx,urls,nuclei,llm (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        skip: Vec<String>,
     },
     /// TUI: review attack points and generate Auto-Solve input
     Review {
         /// Specific project_id (if omitted, pick from list)
         #[arg(long)]
         project_id: Option<String>,
+        /// Select all APs without TUI prompt
+        #[arg(long)]
+        all: bool,
     },
 }
 

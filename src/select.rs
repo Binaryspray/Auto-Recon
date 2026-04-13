@@ -114,13 +114,8 @@ pub fn init_project_dir(project_id: &str, base_dir: &Path, program: &ProgramData
     Ok(project_dir)
 }
 
-pub async fn run_select(
-    cache: &Cache,
-    weights: &Weights,
-    projects_dir: &str,
-    recon_opts: crate::recon::ReconOptions,
-    auto_review: bool,
-) -> Result<()> {
+pub async fn run_select(cache: &Cache, weights: &Weights, projects_dir: &str, force: bool, skip: Vec<String>) -> Result<()> {
+    let skip_steps: HashSet<String> = skip.into_iter().collect();
     let programs = cache.get_all_programs().await?;
 
     // Score and sort — skip programs with no web scopes
@@ -165,12 +160,8 @@ pub async fn run_select(
 
     let base_dir = Path::new(projects_dir);
 
-    // H1 client for official scope CSV download (optional)
-    let h1_client = match (std::env::var("H1_USERNAME"), std::env::var("H1_API_TOKEN")) {
-        (Ok(u), Ok(t)) => Some(crate::api::client::H1Client::new(&u, &t)),
-        _ => None,
-    };
-
+    // Prepare selected BBPs
+    let mut bbp_tasks = Vec::new();
     for idx in selections {
         let (program, scopes, score) = &entries[idx];
         let web_scopes = filter_web_scopes(scopes);
@@ -182,31 +173,47 @@ pub async fn run_select(
 
         let project_id = make_project_id(&program.attributes.handle);
         let project_dir = init_project_dir(&project_id, base_dir, program, score, &web_scopes)?;
-        println!("Created project: {}", project_dir.display());
 
-        // Download official H1 scope CSV (non-blocking)
-        if let Some(ref client) = h1_client {
-            match client.download_scope_csv(&program.attributes.handle).await {
-                Ok(csv) => {
-                    if let Err(e) = std::fs::write(project_dir.join("h1_scope.csv"), &csv) {
-                        eprintln!("Warning: failed to write h1_scope.csv: {}", e);
-                    } else {
-                        println!("  Downloaded h1_scope.csv ({} bytes)", csv.len());
-                    }
-                }
-                Err(e) => eprintln!("Warning: could not download scope CSV: {}", e),
-            }
+        // Save program policy if available
+        if let Ok(Some(policy)) = cache.get_policy(&program.attributes.handle).await {
+            let _ = std::fs::write(project_dir.join("policy.md"), &policy);
         }
 
-        // Run recon pipeline
-        crate::recon::run_recon(&project_dir, recon_opts.clone()).await?;
+        bbp_tasks.push((program.attributes.handle.clone(), project_dir));
+    }
 
-        // Auto-launch review TUI
-        if auto_review {
-            println!("\n=== Launching review for {} ===\n", project_id);
-            crate::review::run_review(projects_dir, Some(&project_id)).await?;
-        } else {
-            println!("\nTo review this project: h1scout review --project-id {}", project_id);
+    if bbp_tasks.len() == 1 {
+        // Single BBP — run directly without MultiProgress overhead
+        let (handle, project_dir) = &bbp_tasks[0];
+        println!("Starting recon: {}", handle);
+        crate::recon::run_recon(project_dir, force, &skip_steps).await?;
+    } else {
+        // Multiple BBPs — run in parallel with semaphore
+        let mp = MultiProgress::new();
+        let sem = Arc::new(Semaphore::new(3));
+        let skip_steps = Arc::new(skip_steps);
+
+        let mut handles = Vec::new();
+        for (handle, project_dir) in bbp_tasks {
+            let sem = sem.clone();
+            let skip_steps = skip_steps.clone();
+            let mp_clone = mp.clone();
+
+            let h = tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                let _ = mp_clone; // keep MultiProgress alive
+                println!("Starting recon: {}", handle);
+                match crate::recon::run_recon(&project_dir, force, &skip_steps).await {
+                    Ok(()) => println!("Completed: {}", handle),
+                    Err(e) => eprintln!("Failed {}: {}", handle, e),
+                }
+            });
+            handles.push(h);
+        }
+
+        // Wait for all BBPs
+        for h in handles {
+            let _ = h.await;
         }
     }
 

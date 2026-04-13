@@ -38,6 +38,7 @@ fn test_rr_loading() {
                 url: "https://api.test.com/v1/users/123".to_string(),
                 method: "GET".to_string(),
                 category: "idor_candidate".to_string(),
+                group_id: None,
                 priority: 1,
                 evidence: Evidence {
                     source: "gau".to_string(),
@@ -51,6 +52,7 @@ fn test_rr_loading() {
                 url: "https://api.test.com/swagger".to_string(),
                 method: "GET".to_string(),
                 category: "exposure".to_string(),
+                group_id: None,
                 priority: 2,
                 evidence: Evidence {
                     source: "nuclei".to_string(),
@@ -82,6 +84,7 @@ fn test_ap_display_format() {
         url: "https://api.test.com/v1/users/123".to_string(),
         method: "GET".to_string(),
         category: "idor_candidate".to_string(),
+        group_id: None,
         priority: 1,
         evidence: Evidence {
             source: "gau".to_string(),
@@ -129,6 +132,7 @@ fn test_solve_output_format() {
             url: "https://api.test.com/v1/users/123".to_string(),
             method: "GET".to_string(),
             category: "idor_candidate".to_string(),
+            group_id: None,
             priority: 1,
             evidence: Evidence {
                 source: "gau".to_string(),

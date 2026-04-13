@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cp ~/Auto-Recon/src/recon.rs ~/Auto-Recon/src/select.rs ~/Auto-Recon/src/cli.rs ~/Auto-Recon/src/main.rs ~/Auto-Recon/src/llm.rs /mnt/c/Users/yeonsu/Documents/GitHub/Auto-Recon/src/)",
+      "Bash(cp ~/Auto-Recon/src/api/client.rs ~/Auto-Recon/src/api/models.rs /mnt/c/Users/yeonsu/Documents/GitHub/Auto-Recon/src/api/)",
+      "Bash(cp ~/Auto-Recon/src/db/cache.rs /mnt/c/Users/yeonsu/Documents/GitHub/Auto-Recon/src/db/)",
+      "Bash(cp ~/Auto-Recon/SKILL/ap-identifier-SKILL.md /mnt/c/Users/yeonsu/Documents/GitHub/Auto-Recon/SKILL/)",
+      "Bash(cp ~/Auto-Recon/tests/review_test.rs /mnt/c/Users/yeonsu/Documents/GitHub/Auto-Recon/tests/)"
+    ]
+  }
+}

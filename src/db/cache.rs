@@ -30,6 +30,11 @@ impl Cache {
         .execute(&pool)
         .await?;
 
+        // Add policy column if not exists (migration for existing DBs)
+        let _ = sqlx::query("ALTER TABLE programs ADD COLUMN policy TEXT")
+            .execute(&pool)
+            .await;
+
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS scopes (
                 id TEXT PRIMARY KEY,
@@ -71,6 +76,27 @@ impl Cache {
             .await?;
         }
         Ok(())
+    }
+
+    pub async fn upsert_policy(&self, handle: &str, policy: &str) -> Result<()> {
+        sqlx::query(
+            "UPDATE programs SET policy = ?1 WHERE handle = ?2",
+        )
+        .bind(policy)
+        .bind(handle)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_policy(&self, handle: &str) -> Result<Option<String>> {
+        let row: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT policy FROM programs WHERE handle = ?1",
+        )
+        .bind(handle)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.and_then(|r| r.0))
     }
 
     pub async fn upsert_scopes(&self, handle: &str, scopes: &[ScopeData]) -> Result<()> {
